@@ -18,7 +18,8 @@ $WASI_SDK_PREFIX/bin/clang++ -fno-exceptions -std=c++20 \
 rm -rf llvm-build
 mkdir -p llvm-build
 pushd llvm-build
-cmake ../llvm/llvm -G Ninja -DCMAKE_BUILD_TYPE=Release -DWASI_SDK_PREFIX=${WASI_SDK_PREFIX} \
+cmake ../llvm/llvm -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DWASI_SDK_PREFIX=${WASI_SDK_PREFIX} \
   -DCMAKE_TOOLCHAIN_FILE=${WASI_SDK_PREFIX}/share/cmake/wasi-sdk.cmake \
   -DLLVM_TARGETS_TO_BUILD=WebAssembly -DLLVM_ENABLE_PROJECTS="clang;lld" \
   -DLLVM_ENABLE_THREADS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \
