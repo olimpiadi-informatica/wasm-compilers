@@ -36,9 +36,10 @@ popd
 rm -rf build/output
 mkdir -p build/output/root
 cp -Lr ${WASI_SDK_PREFIX}/share/wasi-sysroot/* build/output/root/
+cp -L ${WASI_SDK_PREFIX}/lib/clang/*/lib/wasi/libclang_rt.builtins-wasm32.a build/output/root/lib/wasm32-wasi/
 rm -rf build/output/root/share/wasm32-wasi-threads build/output/root/lib/wasm32-wasi-threads
 cp -Lr llvm-build/lib/clang/18/include build/output/root/clang-include
-cp -Lr llvm-build/bin/clang-18 build/output/
+cp -Lr llvm-build/bin/clang-18 build/output/clang
 cp -Lr llvm-build/bin/lld build/output/wasm-ld
 
-tar c build/output | brotli > build/output.tar.br
+(cd build/output && tar c .) | brotli > build/output.tar.br
