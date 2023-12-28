@@ -2,11 +2,17 @@
 
 set -xe
 
-DIR=build/fs
+DIR=build/test
+
+$(which wasmtime) run --dir $PWD/build/output/python::/ \
+  --env PYTHONPATH=/lib/python-3.13 \
+  $PWD/build/output/python/bin/python3.wasm \
+  -c "import json; print(json.dumps('hello'))"
 
 rm -rf $DIR
 mkdir -p $DIR
-brotli -d --stdout build/output.tar.br | tar x -C $DIR
+cp -r build/output/cpp/* $DIR
+
 cat > $DIR/root/main.cc << EOF
 #include <stdio.h>
 #include <string>
