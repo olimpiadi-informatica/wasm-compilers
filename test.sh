@@ -2,18 +2,22 @@
 
 set -xe
 
-DIR=build/test
+ROOT=$PWD/build/output
+CPPROOT=$ROOT/cpp
+PYROOT=$ROOT/python
 
-$(which wasmtime) run --dir $PWD/build/output/python::/ \
+$(which wasmtime) run --dir $PYROOT::/ \
   --env PYTHONPATH=/lib/python-3.13 \
-  $PWD/build/output/python/bin/python3.wasm \
+  $PYROOT/bin/python3.13.wasm \
   -c "import json; print(json.dumps('hello'))"
+
+DIR=build/test
 
 rm -rf $DIR
 mkdir -p $DIR
-cp -r build/output/cpp/* $DIR
+cp -r $CPPROOT/* $DIR
 
-cat > $DIR/root/main.cc << EOF
+cat > $DIR/main.cc << EOF
 #include <stdio.h>
 #include <string>
 #include <vector>
@@ -32,15 +36,16 @@ int main(int argc, char **argv) {
 }
 EOF
 
-wasmtime --dir $DIR/root/::/ \
-  $DIR/clang -cc1 \
-  -I /include/c++/v1/ -I /clang-include/ -I /include/ \
+wasmtime --dir $DIR::/ \
+  $DIR/bin/clang++ -cc1 -isysroot / \
+  "-resource-dir" "lib/clang/18" -I /include/c++/v1 "-isysroot" "/" \
+  "-internal-isystem" "lib/clang/18/include" "-internal-isystem" "/include/wasm32-wasi" "-internal-isystem" "/include" \
   -O2 -emit-obj main.cc -o main.wasm
 
-wasmtime --dir $DIR/root::/ \
-  $DIR/wasm-ld \
-  -L /lib/wasm32-wasi/ \
-  -lc -lclang_rt.builtins-wasm32 /lib/wasm32-wasi/crt1.o \
+wasmtime --dir $DIR::/ \
+  $DIR/bin/wasm-ld \
+  -L /lib/wasm32-wasi/ /lib/clang/18/lib/wasi/libclang_rt.builtins-wasm32.a \
+  -lc /lib/wasm32-wasi/crt1.o \
   -lc++ -lc++abi main.wasm -o main 
 
-wasmtime $DIR/root/main a b c d <<< 13845
+wasmtime $DIR/main a b c d <<< 13845

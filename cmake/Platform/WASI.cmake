@@ -1,4 +1,2 @@
 set(WASI 1)
-
-# This is a lie, but llvm needs it.
-set(UNIX 1)
+set(TARGET_SUPPORTS_SHARED_LIBS FALSE)
