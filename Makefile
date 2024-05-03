@@ -1,8 +1,7 @@
 PYTHON := /usr/bin/env python3
 DIR := $(shell pwd)
 SYSROOT := ${DIR}/build/sysroot
-WASMTIME := $(shell which wasmtime)
-CLANG_VERSION := $(shell /usr/bin/env bash ./llvm_version_major.sh llvm)
+CLANG_VERSION := $(shell /usr/bin/env bash ./llvm_version_major.sh llvm-project)
 
 OUTPUT := ${DIR}/build/output
 
@@ -12,9 +11,12 @@ WASM_CC := ${LLVM_HOST}/bin/clang
 WASM_CXX := ${LLVM_HOST}/bin/clang++
 WASM_NM := ${LLVM_HOST}/bin/llvm-nm
 WASM_AR := ${LLVM_HOST}/bin/llvm-ar
-WASM_CFLAGS := -ffile-prefix-map=${DIR}=/
-WASM_CXXFLAGS := -ffile-prefix-map=${DIR}=/
-WASM_LDFLAGS := -Wl,-z -Wl,stack-size=1048576
+WASM_CFLAGS := -ffile-prefix-map=${DIR}=/ -matomics -mbulk-memory -mmutable-globals
+WASM_CXXFLAGS := -ffile-prefix-map=${DIR}=/ -matomics -mbulk-memory -mmutable-globals
+WASM_LDFLAGS := -Wl,-z -Wl,stack-size=10485760 \
+								-Wl,--shared-memory -Wl,--export-memory -Wl,--import-memory \
+								-Wl,--max-memory=4294967296 \
+								-Wl,--initial-memory=41943040
 MAKE := make
 
 all: ${OUTPUT}.DONE test
@@ -22,28 +24,25 @@ all: ${OUTPUT}.DONE test
 build:
 	mkdir -p build
 
-build/llvm-host.BUILT: llvm | build
-	rsync -a --delete llvm/ build/llvm-host-src
+build/llvm-host.BUILT: llvm-project | build
+	rsync -a --delete llvm-project/ build/llvm-host-src
 	cmake -S build/llvm-host-src/llvm -B build/llvm-host-build \
 		-DCMAKE_INSTALL_PREFIX="${DIR}/build/llvm-host" -DDEFAULT_SYSROOT=${SYSROOT} \
 		-DCMAKE_BUILD_TYPE=Release \
-		-DLLVM_TARGETS_TO_BUILD=WebAssembly -DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-wasi \
+		-DLLVM_TARGETS_TO_BUILD=WebAssembly -DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-wasi-threads \
 		-DLLVM_ENABLE_PROJECTS="clang;lld"
 	$(MAKE) -C build/llvm-host-build install
 	touch $@
 
-build/wasi-libc.BUILT: wasi-libc wasi-libc-polyfill.c wasi-libc.patch build/llvm-host.BUILT | build
+build/wasi-libc.BUILT: wasi-libc build/llvm-host.BUILT | build
 	rsync -a --delete wasi-libc/ build/wasi-libc
-	cd "build/wasi-libc" && patch -p1 < ${DIR}/wasi-libc.patch
-	cp wasi-libc-polyfill.c build/wasi-libc
-	$(MAKE) -C build/wasi-libc THREAD_MODEL=single \
+	$(MAKE) -C build/wasi-libc THREAD_MODEL=posix \
 		CC=${WASM_CC} AR=$(WASM_AR) NM=${WASM_NM} EXTRA_CFLAGS="${WASI_CFLAGS} -O2 -DNDEBUG" \
 		INSTALL_DIR=${SYSROOT} install
 	touch $@
 
-build/llvm.SRC: llvm llvm.patch | build
-	rsync -a --delete llvm/ build/llvm-src
-	cd "build/llvm-src" && patch -p1 < ${DIR}/llvm.patch
+build/llvm.SRC: llvm-project | build
+	rsync -a --delete llvm-project/ build/llvm-src
 	touch $@
 
 build/compiler-rt-host.BUILT: build/llvm.SRC build/wasi-libc.BUILT
@@ -87,10 +86,6 @@ build/libcxx.BUILT: build/compiler-rt.BUILT
 		-DCMAKE_C_COMPILER_WORKS=ON \
 		-DCMAKE_CXX_COMPILER_WORKS=ON \
 		-DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
-    -DLIBCXX_ENABLE_THREADS:BOOL=OFF \
-    -DLIBCXX_HAS_PTHREAD_API:BOOL=OFF \
-    -DLIBCXX_HAS_EXTERNAL_THREAD_API:BOOL=OFF \
-    -DLIBCXX_HAS_WIN32_THREAD_API:BOOL=OFF \
     -DLIBCXX_ENABLE_SHARED:BOOL=OFF \
     -DLIBCXX_ENABLE_EXCEPTIONS:BOOL=OFF \
     -DLIBCXX_ENABLE_ABI_LINKER_SCRIPT:BOOL=OFF \
@@ -100,12 +95,9 @@ build/libcxx.BUILT: build/compiler-rt.BUILT
     -DLIBCXXABI_ENABLE_EXCEPTIONS:BOOL=OFF \
     -DLIBCXXABI_ENABLE_SHARED:BOOL=OFF \
     -DLIBCXXABI_SILENT_TERMINATE:BOOL=ON \
-    -DLIBCXXABI_ENABLE_THREADS:BOOL=OFF \
-    -DLIBCXXABI_HAS_PTHREAD_API:BOOL=OFF \
-    -DLIBCXXABI_HAS_EXTERNAL_THREAD_API:BOOL=OFF \
-    -DLIBCXXABI_HAS_WIN32_THREAD_API:BOOL=OFF \
-		-DLIBCXX_LIBDIR_SUFFIX=/wasm32-wasi \
-		-DLIBCXXABI_LIBDIR_SUFFIX=/wasm32-wasi
+		-DLIBCXXABI_USE_LLVM_UNWINDER=OFF \
+		-DLIBCXX_LIBDIR_SUFFIX=/wasm32-wasi-threads \
+		-DLIBCXXABI_LIBDIR_SUFFIX=/wasm32-wasi-threads
 	$(MAKE) -C build/libcxx-build install
 	touch $@ 
 
@@ -117,8 +109,8 @@ build/llvm.BUILT: build/llvm.SRC build/libcxx.BUILT
 		-DCMAKE_C_FLAGS="-I${DIR} ${WASM_C}" \
 		-DCMAKE_CXX_FLAGS="-I${DIR} ${WASM_CXXFLAGS} -fno-exceptions" \
 		-DLLVM_TARGETS_TO_BUILD=WebAssembly -DLLVM_ENABLE_PROJECTS="clang;lld;clang-tools-extra" \
-		-DLLVM_ENABLE_THREADS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \
-		-DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-wasi \
+		-DLLVM_INCLUDE_BENCHMARKS=OFF \
+		-DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-wasi-threads \
 		-DLLVM_INCLUDE_TESTS=OFF -DCLANG_PLUGIN_SUPPORT=OFF \
 		-DLLVM_BUILD_LLVM_DYLIB=OFF -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_ENABLE_PIC=OFF \
 		-DLLVM_INCLUDE_UTILS=OFF -DLLVM_BUILD_UTILS=OFF -DLLVM_ENABLE_PLUGINS=OFF \
@@ -129,32 +121,34 @@ build/llvm.BUILT: build/llvm.SRC build/libcxx.BUILT
 # Technically, this only needs wasi-libc, but errors get hidden otherwise.
 build/python.BUILT: build/wasi-libc.BUILT build/llvm.BUILT
 	rsync -a --delete cpython/ build/cpython
+	sed -i s/-Wl,--max-memory=10485760// build/cpython/configure
 	mkdir -p build/cpython/host-build
 	cd build/cpython/host-build && ../configure --prefix=${DIR}/build/cpython/install --disable-test-modules
 	$(MAKE) -C build/cpython/host-build
 	mkdir -p build/cpython/wasm-build
 	cd build/cpython/wasm-build && \
+		PATH=${LLVM_HOST}/bin:$$PATH LDFLAGS="${WASM_LDFLAGS}" CFLAGS="${WASM_CFLAGS}" \
 		../configure --target wasm32-wasi --host wasm32-wasi --build=$(shell $(CC) -dumpmachine) \
 		--with-build-python=${DIR}/build/cpython/host-build/python \
-		CC=${WASM_CC} AR=$(WASM_AR) NM=${WASM_NM} CFLAGS=${WASM_CFLAGS} \
+		CC=${WASM_CC} AR=${WASM_AR} NM=${WASM_NM} \
 		--prefix=${DIR}/build/sysroot --with-lto=full \
-		--enable-wasm-pthreads=no --disable-test-modules \
+		--enable-wasm-pthreads=yes --disable-test-modules \
 		CONFIG_SITE=${DIR}/cpython-config-override
 	$(MAKE) -C build/cpython/wasm-build install
 	touch "$@"
 
 ${OUTPUT}/cpp.COPIED: build/llvm.BUILT build/python.BUILT
 	mkdir -p ${OUTPUT}/cpp/{bin,lib,include}
-	rsync -avL ${SYSROOT}/bin/clang++ ${SYSROOT}/bin/wasm-ld ${OUTPUT}/cpp/bin/
-	rsync -avL ${SYSROOT}/lib/clang ${SYSROOT}/lib/wasm32-wasi ${OUTPUT}/cpp/lib/
-	rsync -avL ${SYSROOT}/include/c++ ${SYSROOT}/include/wasm32-wasi ${OUTPUT}/cpp/include/
+	rsync -avL ${SYSROOT}/bin/clang++ ${SYSROOT}/bin/wasm-ld ${SYSROOT}/bin/clangd ${OUTPUT}/cpp/bin/
+	rsync -avL ${SYSROOT}/lib/clang ${SYSROOT}/lib/wasm32-wasi-threads ${OUTPUT}/cpp/lib/
+	rsync -avL ${SYSROOT}/include/c++ ${SYSROOT}/include/wasm32-wasi-threads ${OUTPUT}/cpp/include/
 	touch "$@"
 
 ${OUTPUT}/python.COPIED: build/llvm.BUILT build/python.BUILT
 	mkdir -p ${OUTPUT}/python/{bin,lib,include}
-	rsync -avL ${SYSROOT}/bin/python3.13.wasm ${OUTPUT}/python/bin/
-	rsync -avL ${SYSROOT}/lib/libpython3.13.a ${SYSROOT}/lib/python3.13 --exclude python3.13/config-3.13-wasm32-wasi ${OUTPUT}/python/lib/
-	rsync -avL ${SYSROOT}/include/python3.13 ${OUTPUT}/python/include/
+	rsync -avL ${SYSROOT}/bin/python3.12.wasm ${OUTPUT}/python/bin/
+	rsync -avL ${SYSROOT}/lib/libpython3.12.a ${SYSROOT}/lib/python3.12 --exclude python3.12/config-3.12-wasm32-wasi ${OUTPUT}/python/lib/
+	rsync -avL ${SYSROOT}/include/python3.12 ${OUTPUT}/python/include/
 	touch "$@"
 
 test: test.sh ${OUTPUT}/cpp.COPIED ${OUTPUT}/python.COPIED

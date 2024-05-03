@@ -6,9 +6,9 @@ ROOT=$PWD/build/output
 CPPROOT=$ROOT/cpp
 PYROOT=$ROOT/python
 
-$(which wasmtime) run --dir $PYROOT::/ \
-  --env PYTHONPATH=/lib/python-3.13 \
-  $PYROOT/bin/python3.13.wasm \
+$(which wasmtime) -W threads=y -S threads=y --dir $PYROOT::/ \
+  --env PYTHONPATH=/lib/python-3.12 \
+  $PYROOT/bin/python3.12.wasm \
   -c "import json; print(json.dumps('hello'))"
 
 DIR=build/test
@@ -36,16 +36,18 @@ int main(int argc, char **argv) {
 }
 EOF
 
-wasmtime --dir $DIR::/ \
+$(which wasmtime) -W threads=y -S threads=y --dir $DIR::/ \
   $DIR/bin/clang++ -cc1 -isysroot / \
-  "-resource-dir" "lib/clang/18" -I /include/c++/v1 "-isysroot" "/" \
-  "-internal-isystem" "lib/clang/18/include" "-internal-isystem" "/include/wasm32-wasi" "-internal-isystem" "/include" \
+  "-resource-dir" "lib/clang/19" -I /include/c++/v1 "-isysroot" "/" \
+  "-internal-isystem" "lib/clang/19/include" "-internal-isystem" "/include/wasm32-wasi-threads" "-internal-isystem" "/include" \
+  "-target-feature" "+atomics" "-target-feature" "+bulk-memory" "-target-feature" "+mutable-globals" \
   -O2 -emit-obj main.cc -o main.wasm
 
-wasmtime --dir $DIR::/ \
+$(which wasmtime) -W threads=y -S threads=y --dir $DIR::/ \
   $DIR/bin/wasm-ld \
-  -L /lib/wasm32-wasi/ /lib/clang/18/lib/wasi/libclang_rt.builtins-wasm32.a \
-  -lc /lib/wasm32-wasi/crt1.o \
+  -L /lib/wasm32-wasi-threads/ /lib/clang/19/lib/wasi/libclang_rt.builtins-wasm32.a \
+  -lc /lib/wasm32-wasi-threads/crt1.o \
+  -z stack-size=1048576 --shared-memory --import-memory --export-memory --max-memory=4294967296 \
   -lc++ -lc++abi main.wasm -o main 
 
-wasmtime $DIR/main a b c d <<< 13845
+$(which wasmtime) -W threads=y -S threads=y $DIR/main a b c d <<< 13845

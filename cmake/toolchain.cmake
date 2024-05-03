@@ -7,7 +7,7 @@ set(CMAKE_SYSTEM_NAME WASI)
 set(CMAKE_SYSTEM_VERSION 1)
 set(CMAKE_SYSTEM_PROCESSOR wasm32)
 
-set(triple wasm32-wasi)
+set(triple wasm32-wasi-threads)
 
 set(CMAKE_C_COMPILER ${WASM_PREFIX}/bin/clang)
 set(CMAKE_CXX_COMPILER ${WASM_PREFIX}/bin/clang++)
