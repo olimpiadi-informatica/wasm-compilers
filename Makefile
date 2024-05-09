@@ -137,11 +137,13 @@ build/python.BUILT: build/wasi-libc.BUILT build/llvm.BUILT
 	$(MAKE) -C build/cpython/wasm-build install
 	touch "$@"
 
-${OUTPUT}/cpp.COPIED: build/llvm.BUILT build/python.BUILT
+${OUTPUT}/cpp.COPIED: build/llvm.BUILT build/python.BUILT additional_includes/bits_stdc++.h
 	mkdir -p ${OUTPUT}/cpp/{bin,lib,include}
 	rsync -avL ${SYSROOT}/bin/clang++ ${SYSROOT}/bin/wasm-ld ${SYSROOT}/bin/clangd ${OUTPUT}/cpp/bin/
 	rsync -avL ${SYSROOT}/lib/clang ${SYSROOT}/lib/wasm32-wasi-threads ${OUTPUT}/cpp/lib/
 	rsync -avL ${SYSROOT}/include/c++ ${SYSROOT}/include/wasm32-wasi-threads ${OUTPUT}/cpp/include/
+	mkdir -p ${OUTPUT}/cpp/include/bits
+	cp additional_includes/bits_stdc++.h ${OUTPUT}/cpp/include/bits/stdc++.h
 	touch "$@"
 
 ${OUTPUT}/python.COPIED: build/llvm.BUILT build/python.BUILT

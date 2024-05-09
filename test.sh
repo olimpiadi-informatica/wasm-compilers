@@ -18,9 +18,7 @@ mkdir -p $DIR
 cp -r $CPPROOT/* $DIR
 
 cat > $DIR/main.cc << EOF
-#include <stdio.h>
-#include <string>
-#include <vector>
+#include <bits/stdc++.h>
 int main(int argc, char **argv) {
   std::vector<std::string> v;
   for (size_t i = 0; i < argc; i++) {
