@@ -103,9 +103,7 @@
 #include <semaphore>
 #include <source_location>
 #include <span>
-#include <spanstream>
 #include <stdatomic.h>
-#include <stdfloat>
 #include <stop_token>
 #include <syncstream>
 #include <version>
