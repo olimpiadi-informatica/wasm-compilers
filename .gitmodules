@@ -8,3 +8,7 @@
 	path = llvm-project
 	url = https://github.com/veluca93/llvm-project
 	branch = wasi-build
+[submodule "gcc"]
+	path = gcc
+	url = https://github.com/gcc-mirror/gcc.git
+	branch = cd0059a1976303638cea95f216de129334fc04d1

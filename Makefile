@@ -12,11 +12,14 @@ WASM_CXX := ${LLVM_HOST}/bin/clang++
 WASM_NM := ${LLVM_HOST}/bin/llvm-nm
 WASM_AR := ${LLVM_HOST}/bin/llvm-ar
 WASM_CFLAGS := -ffile-prefix-map=${DIR}=/ -matomics -mbulk-memory -mmutable-globals
-WASM_CXXFLAGS := -ffile-prefix-map=${DIR}=/ -matomics -mbulk-memory -mmutable-globals
+WASM_CXXFLAGS := -ffile-prefix-map=${DIR}=/ -matomics -mbulk-memory -mmutable-globals \
+								 -stdlib=libstdc++ -I ${SYSROOT}/include/c++/15.0.0/wasm32-wasi/ \
+								 -I ${SYSROOT}/include/c++/15.0.0/
 WASM_LDFLAGS := -Wl,-z -Wl,stack-size=10485760 \
 								-Wl,--shared-memory -Wl,--export-memory -Wl,--import-memory \
 								-Wl,--max-memory=4294967296 \
-								-Wl,--initial-memory=41943040
+								-Wl,--initial-memory=41943040 \
+								-L${SYSROOT}/lib/
 MAKE := make
 
 all: ${OUTPUT}.DONE test
@@ -36,6 +39,8 @@ build/llvm-host.BUILT: llvm-project | build
 
 build/wasi-libc.BUILT: wasi-libc build/llvm-host.BUILT | build
 	rsync -a --delete wasi-libc/ build/wasi-libc
+	sed -i 's/#define DEFAULT_STACK_SIZE 131072/#define DEFAULT_STACK_SIZE 10485760/' \
+		build/wasi-libc/libc-top-half/musl/src/internal/pthread_impl.h
 	$(MAKE) -C build/wasi-libc THREAD_MODEL=posix \
 		CC=${WASM_CC} AR=$(WASM_AR) NM=${WASM_NM} EXTRA_CFLAGS="${WASI_CFLAGS} -O2 -DNDEBUG" \
 		INSTALL_DIR=${SYSROOT} install
@@ -49,7 +54,7 @@ build/compiler-rt-host.BUILT: build/llvm.SRC build/wasi-libc.BUILT
 	mkdir -p build/compiler-rt-build-host
 	cmake -B build/compiler-rt-build-host -S build/llvm-src/compiler-rt/lib/builtins \
 		-DWASM_PREFIX=${LLVM_HOST} -DCMAKE_TOOLCHAIN_FILE=${DIR}/cmake/toolchain.cmake \
-		-DCMAKE_C_FLAGS="-I${DIR} ${WASM_C}" \
+		-DCMAKE_C_FLAGS="-I${DIR} ${WASM_CFLAGS}" \
 		-DCOMPILER_RT_BAREMETAL_BUILD=On \
 		-DCOMPILER_RT_INCLUDE_TESTS=OFF \
 		-DCOMPILER_RT_HAS_FPIC_FLAG=OFF \
@@ -63,7 +68,7 @@ build/compiler-rt.BUILT: build/llvm.SRC build/compiler-rt-host.BUILT
 	mkdir -p build/compiler-rt-build
 	cmake -B build/compiler-rt-build -S build/llvm-src/compiler-rt/lib/builtins \
 		-DWASM_PREFIX=${LLVM_HOST} -DCMAKE_TOOLCHAIN_FILE=${DIR}/cmake/toolchain.cmake \
-		-DCMAKE_C_FLAGS="-I${DIR} ${WASM_C}" \
+		-DCMAKE_C_FLAGS="-I${DIR} ${WASM_CFLAGS}" \
 		-DCOMPILER_RT_BAREMETAL_BUILD=On \
 		-DCOMPILER_RT_INCLUDE_TESTS=OFF \
 		-DCOMPILER_RT_HAS_FPIC_FLAG=OFF \
@@ -73,40 +78,32 @@ build/compiler-rt.BUILT: build/llvm.SRC build/compiler-rt-host.BUILT
 	$(MAKE) -C build/compiler-rt-build install
 	touch $@ 
 
-build/libcxx.BUILT: build/compiler-rt.BUILT
-	mkdir -p build/libcxx-build
-	# We disable checking the C++ compiler as we are building -lc++, which is needed by the check.
-	cmake -B build/libcxx-build -S build/llvm-src/runtimes \
-		-DCMAKE_BUILD_TYPE=Release \
-		-DCMAKE_SYSROOT=$(SYSROOT) -DCMAKE_INSTALL_PREFIX="${SYSROOT}" -DDEFAULT_SYSROOT="/" \
-		-DWASM_PREFIX=${LLVM_HOST} -DCMAKE_TOOLCHAIN_FILE=${DIR}/cmake/toolchain.cmake \
-		-DCMAKE_C_FLAGS="-I${DIR} ${WASM_C}" \
-		-DCMAKE_CXX_FLAGS="-I${DIR} ${WASM_CXXFLAGS} -fno-exceptions" \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=OFF \
-		-DCMAKE_C_COMPILER_WORKS=ON \
-		-DCMAKE_CXX_COMPILER_WORKS=ON \
-		-DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
-    -DLIBCXX_ENABLE_SHARED:BOOL=OFF \
-    -DLIBCXX_ENABLE_EXCEPTIONS:BOOL=OFF \
-    -DLIBCXX_ENABLE_ABI_LINKER_SCRIPT:BOOL=OFF \
-    -DLIBCXX_CXX_ABI=libcxxabi \
-    -DLIBCXX_HAS_MUSL_LIBC:BOOL=ON \
-    -DLIBCXX_ABI_VERSION=2 \
-    -DLIBCXXABI_ENABLE_EXCEPTIONS:BOOL=OFF \
-    -DLIBCXXABI_ENABLE_SHARED:BOOL=OFF \
-    -DLIBCXXABI_SILENT_TERMINATE:BOOL=ON \
-		-DLIBCXXABI_USE_LLVM_UNWINDER=OFF \
-		-DLIBCXX_LIBDIR_SUFFIX=/wasm32-wasi-threads \
-		-DLIBCXXABI_LIBDIR_SUFFIX=/wasm32-wasi-threads
-	$(MAKE) -C build/libcxx-build install
-	touch $@ 
+LIBSTDCXX_FLAGS=-fsized-deallocation -Wno-unknown-warning-option -Wno-vla-cxx-extension \
+								-Wno-unused-function -Wno-instantiation-after-specialization \
+								-Wno-missing-braces -Wno-unused-variable -Wno-string-plus-int \
+								-Wno-unused-parameter -fno-exceptions
 
-build/llvm.BUILT: build/llvm.SRC build/libcxx.BUILT
+build/libstdcxx.BUILT: build/compiler-rt.BUILT
+	rsync -a --delete gcc/ build/gcc
+	mkdir -p build/gcc-build
+	cd build/gcc-build && \
+		PATH=${LLVM_HOST}/bin:$$PATH LDFLAGS="${WASM_LDFLAGS}" \
+		CXXFLAGS="${LIBSTDCXX_FLAGS} ${WASM_CXXFLAGS}" \
+		../gcc/libstdc++-v3/configure --prefix=${SYSROOT} \
+		--host wasm32-wasi --target wasm32-wasi --build=$(shell $(CC) -dumpmachine) \
+		CC=${WASM_CC} CXX=${WASM_CXX} AR=${WASM_AR} NM=${WASM_NM} \
+		--enable-libstdcxx-threads --enable-shared=off -disable-libstdcxx-dual-abi
+	cd build/gcc-build && PATH=${LLVM_HOST}/bin:$$PATH $(MAKE) \
+		CFLAGS_FOR_TARGET="${WASM_CFLAGS} -fsized-deallocation" \
+		CXXFLAGS_FOR_TARGET="${WASM_CXXFLAGS}" install
+	touch "$@"
+
+build/llvm.BUILT: build/llvm.SRC build/libstdcxx.BUILT
 	cmake -B build/llvm-build -S build/llvm-src/llvm \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_SYSROOT=$(SYSROOT) -DCMAKE_INSTALL_PREFIX="${SYSROOT}" -DDEFAULT_SYSROOT=/ \
 		-DWASM_PREFIX=${LLVM_HOST} -DCMAKE_TOOLCHAIN_FILE=${DIR}/cmake/toolchain.cmake \
-		-DCMAKE_C_FLAGS="-I${DIR} ${WASM_C}" \
+		-DCMAKE_C_FLAGS="-I${DIR} ${WASM_CFLAGS}" \
 		-DCMAKE_CXX_FLAGS="-I${DIR} ${WASM_CXXFLAGS} -fno-exceptions" \
 		-DLLVM_TARGETS_TO_BUILD=WebAssembly -DLLVM_ENABLE_PROJECTS="clang;lld;clang-tools-extra" \
 		-DLLVM_INCLUDE_BENCHMARKS=OFF \
@@ -131,19 +128,19 @@ build/python.BUILT: build/wasi-libc.BUILT build/llvm.BUILT
 		../configure --target wasm32-wasi --host wasm32-wasi --build=$(shell $(CC) -dumpmachine) \
 		--with-build-python=${DIR}/build/cpython/host-build/python \
 		CC=${WASM_CC} AR=${WASM_AR} NM=${WASM_NM} \
-		--prefix=${DIR}/build/sysroot --with-lto=full \
+		--prefix=${SYSROOT} --with-lto=full \
 		--enable-wasm-pthreads=yes --disable-test-modules \
 		CONFIG_SITE=${DIR}/cpython-config-override
 	$(MAKE) -C build/cpython/wasm-build install
 	touch "$@"
 
-${OUTPUT}/cpp.COPIED: build/llvm.BUILT build/python.BUILT additional_includes/bits_stdc++.h
+${OUTPUT}/cpp.COPIED: build/llvm.BUILT build/python.BUILT
 	mkdir -p ${OUTPUT}/cpp/{bin,lib,include}
 	rsync -avL ${SYSROOT}/bin/clang++ ${SYSROOT}/bin/wasm-ld ${SYSROOT}/bin/clangd ${OUTPUT}/cpp/bin/
 	rsync -avL ${SYSROOT}/lib/clang ${SYSROOT}/lib/wasm32-wasi-threads ${OUTPUT}/cpp/lib/
 	rsync -avL ${SYSROOT}/include/c++ ${SYSROOT}/include/wasm32-wasi-threads ${OUTPUT}/cpp/include/
+	rsync -avL ${SYSROOT}/lib/lib{sup,std}c++.a ${OUTPUT}/cpp/lib/
 	mkdir -p ${OUTPUT}/cpp/include/bits
-	cp additional_includes/bits_stdc++.h ${OUTPUT}/cpp/include/bits/stdc++.h
 	touch "$@"
 
 ${OUTPUT}/python.COPIED: build/llvm.BUILT build/python.BUILT
