@@ -1,2 +1,3 @@
 # wasm-compilers
-Tools to run LLVM in a WASI environment
+Build tools to run LLVM and other compilers/language servers in a WASI
+environment.
