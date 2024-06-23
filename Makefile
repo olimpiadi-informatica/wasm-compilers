@@ -92,7 +92,8 @@ build/libstdcxx.BUILT: build/compiler-rt.BUILT
 		../gcc/libstdc++-v3/configure --prefix=${SYSROOT} \
 		--host wasm32-wasi --target wasm32-wasi --build=$(shell $(CC) -dumpmachine) \
 		CC=${WASM_CC} CXX=${WASM_CXX} AR=${WASM_AR} NM=${WASM_NM} \
-		--enable-libstdcxx-threads --enable-shared=off -disable-libstdcxx-dual-abi
+		--enable-libstdcxx-threads --enable-shared=off -disable-libstdcxx-dual-abi \
+		--enable-libstdcxx-filesystem-ts --enable-libstdcxx-time=yes
 	cd build/gcc-build && PATH=${LLVM_HOST}/bin:$$PATH $(MAKE) \
 		CFLAGS_FOR_TARGET="${WASM_CFLAGS} -fsized-deallocation" \
 		CXXFLAGS_FOR_TARGET="${WASM_CXXFLAGS}" install
