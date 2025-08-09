@@ -1,0 +1,37 @@
+name: Build artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - ci
+
+jobs:
+  build-artifacts:
+    name: Build artifacts
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+    steps:
+      - name: Install Deps
+        run: |
+          sudo apt update
+          sudo apt install -yy build-essential clang brotli
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install wasmtime
+        run: cargo install wasmtime-cli
+      - name: Test wasmtime installation
+        run: which wasmtime
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Build
+        run: make -j$(nproc)
+      - name: Upload built compilers
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: compilers
+          path: build/output/*.tar.br
+          compression-level: 0

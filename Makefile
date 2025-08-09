@@ -22,6 +22,9 @@ WASM_LDFLAGS := -Wl,-z -Wl,stack-size=10485760 \
 								-L${SYSROOT}/lib/
 MAKE := make
 
+RT_DIR := wasm32-unknown-wasip1-threads
+
+
 all: ${OUTPUT}.DONE test
 
 build:
@@ -59,10 +62,11 @@ build/compiler-rt-host.BUILT: build/llvm.SRC build/wasi-libc.BUILT
 		-DCOMPILER_RT_INCLUDE_TESTS=OFF \
 		-DCOMPILER_RT_HAS_FPIC_FLAG=OFF \
 		-DCOMPILER_RT_DEFAULT_TARGET_ONLY=On \
-		-DCOMPILER_RT_OS_DIR=wasm32-unknown-wasip1-threads \
+		-DCOMPILER_RT_OS_DIR=${RT_DIR} \
 		-DCMAKE_INSTALL_PREFIX=${LLVM_HOST}/lib/clang/$(CLANG_VERSION)/
 	$(MAKE) -C build/compiler-rt-build-host install
-	mv ${LLVM_HOST}/lib/clang/$(CLANG_VERSION)/lib/wasm32-unknown-wasip1-threads/libclang_rt.builtins{-wasm32,}.a
+	mv ${LLVM_HOST}/lib/clang/$(CLANG_VERSION)/lib/${RT_DIR}/libclang_rt.builtins-wasm32.a \
+		${LLVM_HOST}/lib/clang/$(CLANG_VERSION)/lib/${RT_DIR}/libclang_rt.builtins.a
 	touch $@ 
 
 build/compiler-rt.BUILT: build/llvm.SRC build/compiler-rt-host.BUILT
@@ -74,10 +78,11 @@ build/compiler-rt.BUILT: build/llvm.SRC build/compiler-rt-host.BUILT
 		-DCOMPILER_RT_INCLUDE_TESTS=OFF \
 		-DCOMPILER_RT_HAS_FPIC_FLAG=OFF \
 		-DCOMPILER_RT_DEFAULT_TARGET_ONLY=On \
-		-DCOMPILER_RT_OS_DIR=wasm32-unknown-wasip1-threads \
+		-DCOMPILER_RT_OS_DIR=${RT_DIR} \
 		-DCMAKE_INSTALL_PREFIX=${SYSROOT}/lib/clang/$(CLANG_VERSION)/
 	$(MAKE) -C build/compiler-rt-build install
-	mv ${SYSROOT}/lib/clang/$(CLANG_VERSION)/lib/wasm32-unknown-wasip1-threads/libclang_rt.builtins{-wasm32,}.a
+	mv ${SYSROOT}/lib/clang/$(CLANG_VERSION)/lib/${RT_DIR}/libclang_rt.builtins-wasm32.a \
+		${SYSROOT}/lib/clang/$(CLANG_VERSION)/lib/${RT_DIR}/libclang_rt.builtins.a
 	touch $@ 
 
 LIBSTDCXX_FLAGS=-fsized-deallocation -Wno-unknown-warning-option -Wno-vla-cxx-extension \
@@ -149,7 +154,7 @@ ${OUTPUT}/cpp.COPIED: build/llvm.BUILT build/python.BUILT
 	rsync -avL ${SYSROOT}/bin/llvm ${SYSROOT}/bin/clangd ${OUTPUT}/cpp/bin/
 	rsync -avL ${SYSROOT}/lib/clang ${SYSROOT}/lib/wasm32-wasip1-threads ${OUTPUT}/cpp/lib/
 	rsync -avL ${SYSROOT}/include/c++ ${SYSROOT}/include/wasm32-wasip1-threads ${OUTPUT}/cpp/include/
-	rsync -avL ${SYSROOT}/lib/lib{sup,std}c++.a ${OUTPUT}/cpp/lib/
+	rsync -avL ${SYSROOT}/lib/libsupc++.a ${SYSROOT}/lib/libstdc++.a ${OUTPUT}/cpp/lib/
 	mkdir -p ${OUTPUT}/cpp/include/bits
 	touch "$@"
 
