@@ -1,5 +1,5 @@
 # Inspired by wasi-sdk's toolchain file
-cmake_minimum_required(VERSION 3.4.0)
+cmake_minimum_required(VERSION 3.27.0)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
 
@@ -7,7 +7,7 @@ set(CMAKE_SYSTEM_NAME WASI)
 set(CMAKE_SYSTEM_VERSION 1)
 set(CMAKE_SYSTEM_PROCESSOR wasm32)
 
-set(triple wasm32-wasi-threads)
+set(triple wasm32-wasip1-threads)
 
 set(CMAKE_C_COMPILER ${WASM_PREFIX}/bin/clang)
 set(CMAKE_CXX_COMPILER ${WASM_PREFIX}/bin/clang++)

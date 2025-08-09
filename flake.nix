@@ -22,6 +22,7 @@
               wasmtime
               rsync
               brotli
+              libxml2
             ];
           };
         }

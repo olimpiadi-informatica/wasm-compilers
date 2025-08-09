@@ -7,8 +7,8 @@ CPPROOT=$ROOT/cpp
 PYROOT=$ROOT/python
 
 $(which wasmtime) -W threads=y -S threads=y --dir $PYROOT::/ \
-  --env PYTHONPATH=/lib/python-3.12 \
-  $PYROOT/bin/python3.12.wasm \
+  --env PYTHONPATH=/lib/python-3.13 \
+  $PYROOT/bin/python3.13.wasm \
   -c "import json; print(json.dumps('hello'))"
 
 DIR=build/test
@@ -35,17 +35,17 @@ int main(int argc, char **argv) {
 EOF
 
 $(which wasmtime) -W threads=y -S threads=y --dir $DIR::/ \
-  $DIR/bin/clang++ -cc1 -isysroot / \
-  "-resource-dir" "lib/clang/19" -I "/include/c++/15.0.0/wasm32-wasi/" -I "/include/c++/15.0.0/" "-isysroot" "/" \
-  "-internal-isystem" "lib/clang/19/include" "-internal-isystem" "/include/wasm32-wasi-threads" "-internal-isystem" "/include" \
+  $DIR/bin/llvm clang++ -cc1 -isysroot / \
+  "-resource-dir" "lib/clang/19" -I "/include/c++/15.0.0/wasm32-wasip1/" -I "/include/c++/15.0.0/" "-isysroot" "/" \
+  "-internal-isystem" "lib/clang/19/include" "-internal-isystem" "/include/wasm32-wasip1-threads" "-internal-isystem" "/include" \
   "-target-feature" "+atomics" "-target-feature" "+bulk-memory" "-target-feature" "+mutable-globals" \
   "-stdlib=libstdc++" \
   -O2 -emit-obj main.cc -o main.wasm
 
 $(which wasmtime) -W threads=y -S threads=y --dir $DIR::/ \
-  $DIR/bin/wasm-ld \
-  -L /lib/wasm32-wasi-threads/ /lib/clang/19/lib/wasi/libclang_rt.builtins-wasm32.a \
-  -lc /lib/wasm32-wasi-threads/crt1.o \
+  $DIR/bin/llvm wasm-ld \
+  -L /lib/wasm32-wasip1-threads/ /lib/clang/19/lib/wasm32-unknown-wasip1-threads/libclang_rt.builtins.a \
+  -lc /lib/wasm32-wasip1-threads/crt1.o \
   -L /lib -lstdc++ -lsupc++ \
   -z stack-size=1048576 --shared-memory --import-memory --export-memory --max-memory=4294967296 \
   main.wasm -o main
