@@ -36,15 +36,15 @@ EOF
 
 $(which wasmtime) -W threads=y -S threads=y --dir $DIR::/ \
   $DIR/bin/llvm clang++ -cc1 -isysroot / \
-  "-resource-dir" "lib/clang/19" -I "/include/c++/15.0.0/wasm32-wasip1/" -I "/include/c++/15.0.0/" "-isysroot" "/" \
-  "-internal-isystem" "lib/clang/19/include" "-internal-isystem" "/include/wasm32-wasip1-threads" "-internal-isystem" "/include" \
+  "-resource-dir" "lib/clang/20" -I "/include/c++/15.0.0/wasm32-wasip1/" -I "/include/c++/15.0.0/" "-isysroot" "/" \
+  "-internal-isystem" "lib/clang/20/include" "-internal-isystem" "/include/wasm32-wasip1-threads" "-internal-isystem" "/include" \
   "-target-feature" "+atomics" "-target-feature" "+bulk-memory" "-target-feature" "+mutable-globals" \
   "-stdlib=libstdc++" \
   -O2 -emit-obj main.cc -o main.wasm
 
 $(which wasmtime) -W threads=y -S threads=y --dir $DIR::/ \
   $DIR/bin/llvm wasm-ld \
-  -L /lib/wasm32-wasip1-threads/ /lib/clang/19/lib/wasm32-unknown-wasip1-threads/libclang_rt.builtins.a \
+  -L /lib/wasm32-wasip1-threads/ /lib/clang/20/lib/wasm32-unknown-wasip1-threads/libclang_rt.builtins.a \
   -lc /lib/wasm32-wasip1-threads/crt1.o \
   -L /lib -lstdc++ -lsupc++ \
   -z stack-size=1048576 --shared-memory --import-memory --export-memory --max-memory=4294967296 \
