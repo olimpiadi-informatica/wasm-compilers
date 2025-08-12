@@ -149,27 +149,39 @@ build/python.BUILT: build/wasi-libc.BUILT build/llvm.BUILT
 	$(MAKE) -C build/cpython/wasm-build install
 	touch "$@"
 
-${OUTPUT}/cpp.COPIED: build/llvm.BUILT build/python.BUILT
+${OUTPUT}/cpp.clangd.OPT: build/llvm.BUILT
+	mkdir -p ${OUTPUT}/cpp/bin
+	wasm-opt -O4 ${SYSROOT}/bin/clangd -o ${OUTPUT}/cpp/bin/clangd
+
+${OUTPUT}/cpp.llvm.OPT: build/llvm.BUILT
+	mkdir -p ${OUTPUT}/cpp/bin
+	wasm-opt -O4 ${SYSROOT}/bin/llvm -o ${OUTPUT}/cpp/bin/llvm
+
+${OUTPUT}/python.OPT: build/python.BUILT
+	mkdir -p ${OUTPUT}/python/bin
+	wasm-opt -O4 ${SYSROOT}/bin/python3.13.wasm -o ${OUTPUT}/python/bin/python3.13.wasm
+
+${OUTPUT}/cpp.COPIED: build/llvm.BUILT ${OUTPUT}/cpp.clangd.OPT ${OUTPUT}/cpp.llvm.OPT
 	mkdir -p ${OUTPUT}/cpp/{bin,lib,include}
-	rsync -avL ${SYSROOT}/bin/llvm ${SYSROOT}/bin/clangd ${OUTPUT}/cpp/bin/
 	rsync -avL ${SYSROOT}/lib/clang ${SYSROOT}/lib/wasm32-wasip1-threads ${OUTPUT}/cpp/lib/
 	rsync -avL ${SYSROOT}/include/c++ ${SYSROOT}/include/wasm32-wasip1-threads ${OUTPUT}/cpp/include/
 	rsync -avL ${SYSROOT}/lib/libsupc++.a ${SYSROOT}/lib/libstdc++.a ${OUTPUT}/cpp/lib/
 	mkdir -p ${OUTPUT}/cpp/include/bits
 	touch "$@"
 
-${OUTPUT}/python.COPIED: build/llvm.BUILT build/python.BUILT
+${OUTPUT}/python.COPIED: build/python.BUILT ${OUTPUT}/python.OPT
 	mkdir -p ${OUTPUT}/python/{bin,lib,include}
-	rsync -avL ${SYSROOT}/bin/python3.13.wasm ${OUTPUT}/python/bin/
-	rsync -avL ${SYSROOT}/lib/libpython3.13.a ${SYSROOT}/lib/python3.13 --exclude python3.13/config-3.13-wasm32-wasi ${OUTPUT}/python/lib/
-	rsync -avL ${SYSROOT}/include/python3.13 ${OUTPUT}/python/include/
+	rsync -avL --exclude __pycache__ ${SYSROOT}/lib/python3.13 ${OUTPUT}/python/lib/
 	touch "$@"
 
 test: test.sh ${OUTPUT}/cpp.COPIED ${OUTPUT}/python.COPIED
 	./test.sh
 
-%.tar.br: %.COPIED
-	tar c -C $* . | brotli --large_window=30 > $@
+%.tar: %.COPIED
+	tar c -C $* . > $@
+
+%.tar.br: %.tar
+	brotli $<
 
 ${OUTPUT}.DONE: ${OUTPUT}/cpp.tar.br ${OUTPUT}/python.tar.br
 
@@ -177,3 +189,5 @@ clean:
 	rm -rf build/ cpython/cross-build
 
 .PHONY: all test clean
+
+.NOTINTERMEDIATE:

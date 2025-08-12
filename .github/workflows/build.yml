@@ -17,7 +17,7 @@ jobs:
       - name: Install Deps
         run: |
           sudo apt update
-          sudo apt install -yy build-essential clang brotli
+          sudo apt install -yy build-essential clang brotli binaryen
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install wasmtime
