@@ -169,8 +169,30 @@ ${OUTPUT}/cpp.COPIED: build/llvm.BUILT ${OUTPUT}/cpp.clangd.OPT ${OUTPUT}/cpp.ll
 	mkdir -p ${OUTPUT}/cpp/include/bits
 	touch "$@"
 
-${OUTPUT}/python.COPIED: build/python.BUILT ${OUTPUT}/python.OPT
+build/python-lsp-jsonrpc.SRC: python-lsp-jsonrpc | build
+	rm -rf build/python-lsp-jsonrpc
+	git clone python-lsp-jsonrpc/ build/python-lsp-jsonrpc
+	sed -i 's/"ujson>=3.0.0"//' build/python-lsp-jsonrpc/pyproject.toml
+	touch $@
+
+build/python-lsp-server.SRC: python-lsp-server | build
+	rm -rf build/python-lsp-server
+	git clone python-lsp-server/ build/python-lsp-server
+	sed -i 's/"ujson>=3.0.0",//' build/python-lsp-server/pyproject.toml
+	sed -i 's/"black"//' build/python-lsp-server/pyproject.toml
+	touch $@
+
+build/pylsp.INSTALLED: build/python-lsp-jsonrpc.SRC build/python-lsp-server.SRC
+	pip install --isolated --python-version 3.13 --platform wasm32-wasip1-threads \
+		--no-compile --only-binary=:all: --target ${SYSROOT}/lib/python3.13 \
+		build/python-lsp-jsonrpc/ build/python-lsp-server
+	mv ${SYSROOT}/lib/python3.13/bin/pylsp ${SYSROOT}/bin
+	rmdir ${SYSROOT}/lib/python3.13/bin/
+	touch "$@"
+
+${OUTPUT}/python.COPIED: build/python.BUILT ${OUTPUT}/python.OPT build/pylsp.INSTALLED
 	mkdir -p ${OUTPUT}/python/{bin,lib,include}
+	rsync -avL ${SYSROOT}/bin/pylsp ${OUTPUT}/python/bin/
 	rsync -avL --exclude __pycache__ ${SYSROOT}/lib/python3.13 ${OUTPUT}/python/lib/
 	touch "$@"
 

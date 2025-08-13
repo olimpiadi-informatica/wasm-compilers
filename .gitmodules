@@ -12,3 +12,9 @@
 	path = gcc
 	url = https://github.com/veluca93/gcc.git
 	branch = master 
+[submodule "python-lsp-server"]
+	path = python-lsp-server
+	url = https://github.com/python-lsp/python-lsp-server.git
+[submodule "python-lsp-jsonrpc"]
+	path = python-lsp-jsonrpc
+	url = https://github.com/python-lsp/python-lsp-jsonrpc.git
