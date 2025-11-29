@@ -11,19 +11,25 @@ WASM_CC := ${LLVM_HOST}/bin/clang
 WASM_CXX := ${LLVM_HOST}/bin/clang++
 WASM_NM := ${LLVM_HOST}/bin/llvm-nm
 WASM_AR := ${LLVM_HOST}/bin/llvm-ar
-WASM_CFLAGS := -ffile-prefix-map=${DIR}=/ -matomics -mbulk-memory -mmutable-globals
+WASM_CFLAGS := -ffile-prefix-map=${DIR}=/ -matomics -mbulk-memory -mmutable-globals -Oz
 WASM_CXXFLAGS := -ffile-prefix-map=${DIR}=/ -matomics -mbulk-memory -mmutable-globals \
-								 -stdlib=libstdc++ -I ${SYSROOT}/include/c++/15.0.0/wasm32-wasip1/ \
-								 -I ${SYSROOT}/include/c++/15.0.0/
+                 -stdlib=libstdc++ -I ${SYSROOT}/include/c++/15.0.0/wasm32-wasip1/ \
+                 -I ${SYSROOT}/include/c++/15.0.0/ -Oz
 WASM_LDFLAGS := -Wl,-z -Wl,stack-size=10485760 \
-								-Wl,--shared-memory -Wl,--export-memory -Wl,--import-memory \
-								-Wl,--max-memory=4294967296 \
-								-Wl,--initial-memory=41943040 \
-								-L${SYSROOT}/lib/
+                ``-Wl,--shared-memory -Wl,--export-memory -Wl,--import-memory \
+                ``-Wl,--max-memory=4294967296 \
+                ``-Wl,--initial-memory=41943040 \
+                ``-L${SYSROOT}/lib/
+
+RUST_OPT_FLAGS := -Clink-args=--initial-memory=41943040 \
+                  -Clink-args=--max-memory=4294967296 \
+                  -C opt-level=z
+
+WASM_OPT_FLAGS := -Oz -O4 -Oz -O4 -Oz
+
 MAKE := make
 
 RT_DIR := wasm32-unknown-wasip1-threads
-
 
 all: ${OUTPUT}.DONE test
 
@@ -67,7 +73,7 @@ build/compiler-rt-host.BUILT: build/llvm.SRC build/wasi-libc.BUILT
 	$(MAKE) -C build/compiler-rt-build-host install
 	mv ${LLVM_HOST}/lib/clang/$(CLANG_VERSION)/lib/${RT_DIR}/libclang_rt.builtins-wasm32.a \
 		${LLVM_HOST}/lib/clang/$(CLANG_VERSION)/lib/${RT_DIR}/libclang_rt.builtins.a
-	touch $@ 
+	touch $@
 
 build/compiler-rt.BUILT: build/llvm.SRC build/compiler-rt-host.BUILT
 	mkdir -p build/compiler-rt-build
@@ -83,9 +89,9 @@ build/compiler-rt.BUILT: build/llvm.SRC build/compiler-rt-host.BUILT
 	$(MAKE) -C build/compiler-rt-build install
 	mv ${SYSROOT}/lib/clang/$(CLANG_VERSION)/lib/${RT_DIR}/libclang_rt.builtins-wasm32.a \
 		${SYSROOT}/lib/clang/$(CLANG_VERSION)/lib/${RT_DIR}/libclang_rt.builtins.a
-	touch $@ 
+	touch $@
 
-LIBSTDCXX_FLAGS=-fsized-deallocation -Wno-unknown-warning-option -Wno-vla-cxx-extension \
+LIBSTDCXX_FLAGS = -fsized-deallocation -Wno-unknown-warning-option -Wno-vla-cxx-extension \
 		-Wno-unused-function -Wno-instantiation-after-specialization \
 		-Wno-missing-braces -Wno-unused-variable -Wno-string-plus-int \
 		-Wno-unused-parameter -fno-exceptions -Wno-init-priority-reserved \
@@ -122,7 +128,10 @@ build/llvm.BUILT: build/llvm.SRC build/libstdcxx.BUILT
 		-DLLVM_INCLUDE_TESTS=OFF -DCLANG_PLUGIN_SUPPORT=OFF \
 		-DLLVM_BUILD_LLVM_DYLIB=OFF -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_ENABLE_PIC=OFF \
 		-DLLVM_INCLUDE_UTILS=OFF -DLLVM_BUILD_UTILS=OFF -DLLVM_ENABLE_PLUGINS=OFF \
-		-DCMAKE_EXE_LINKER_FLAGS="${WASM_LDFLAGS}"
+		-DCMAKE_EXE_LINKER_FLAGS="${WASM_LDFLAGS}" \
+		-DCMAKE_CXX_FLAGS_MINSIZEREL="-Oz -DNDEBUG" \
+		-DCMAKE_C_FLAGS_MINSIZEREL="-Oz -DNDEBUG" \
+		-DCMAKE_ASM_FLAGS_MINSIZEREL="-Oz -DNDEBUG"
 	$(MAKE) -C build/llvm-build install
 	touch "$@"
 
@@ -149,19 +158,37 @@ build/python.BUILT: build/wasi-libc.BUILT build/llvm.BUILT
 	$(MAKE) -C build/cpython/wasm-build install
 	touch "$@"
 
-${OUTPUT}/cpp.clangd.OPT: build/llvm.BUILT
-	mkdir -p ${OUTPUT}/cpp/bin
-	wasm-opt -O4 ${SYSROOT}/bin/clangd -o ${OUTPUT}/cpp/bin/clangd
+build/ruff.SRC:
+	rsync -a --delete ruff/ build/ruff
+	cd build/ruff && patch -p1 < ../../ruff.patch
+	touch "$@"
 
-${OUTPUT}/cpp.llvm.OPT: build/llvm.BUILT
-	mkdir -p ${OUTPUT}/cpp/bin
-	wasm-opt -O4 ${SYSROOT}/bin/llvm -o ${OUTPUT}/cpp/bin/llvm
+build/ruff.BUILT: build/python.BUILT build/ruff.SRC
+	cd build/ruff && rustup target add wasm32-wasip1-threads
+	cd build/ruff && RUSTFLAGS="${RUST_OPT_FLAGS}" cargo build --target wasm32-wasip1-threads --release
+	touch "$@"
 
-${OUTPUT}/python.OPT: build/python.BUILT
+build/cpp.clangd.OPT: build/llvm.BUILT
+	mkdir -p ${OUTPUT}/cpp/bin
+	wasm-opt ${WASM_OPT_FLAGS} ${SYSROOT}/bin/clangd -o ${OUTPUT}/cpp/bin/clangd
+	touch "$@"
+
+build/cpp.llvm.OPT: build/llvm.BUILT
+	mkdir -p ${OUTPUT}/cpp/bin
+	wasm-opt ${WASM_OPT_FLAGS} ${SYSROOT}/bin/llvm -o ${OUTPUT}/cpp/bin/llvm
+	touch "$@"
+
+build/python.OPT: build/python.BUILT
 	mkdir -p ${OUTPUT}/python/bin
-	wasm-opt -O4 ${SYSROOT}/bin/python3.13.wasm -o ${OUTPUT}/python/bin/python3.13.wasm
+	wasm-opt ${WASM_OPT_FLAGS} ${SYSROOT}/bin/python3.13.wasm -o ${OUTPUT}/python/bin/python3.13.wasm
+	touch "$@"
 
-${OUTPUT}/cpp.COPIED: build/llvm.BUILT ${OUTPUT}/cpp.clangd.OPT ${OUTPUT}/cpp.llvm.OPT
+build/ruff.OPT: build/ruff.BUILT
+	mkdir -p ${OUTPUT}/python/bin
+	wasm-opt ${WASM_OPT_FLAGS} build/ruff/target/wasm32-wasip1-threads/release/ruff.wasm -o ${OUTPUT}/python/bin/ruff.wasm
+	touch "$@"
+
+${OUTPUT}/cpp.COPIED: build/llvm.BUILT build/cpp.clangd.OPT build/cpp.llvm.OPT
 	mkdir -p ${OUTPUT}/cpp/{bin,lib,include}
 	rsync -avL ${SYSROOT}/lib/clang ${SYSROOT}/lib/wasm32-wasip1-threads ${OUTPUT}/cpp/lib/
 	rsync -avL ${SYSROOT}/include/c++ ${SYSROOT}/include/wasm32-wasip1-threads ${OUTPUT}/cpp/include/
@@ -169,9 +196,9 @@ ${OUTPUT}/cpp.COPIED: build/llvm.BUILT ${OUTPUT}/cpp.clangd.OPT ${OUTPUT}/cpp.ll
 	mkdir -p ${OUTPUT}/cpp/include/bits
 	touch "$@"
 
-${OUTPUT}/python.COPIED: build/python.BUILT ${OUTPUT}/python.OPT
+${OUTPUT}/python.COPIED: build/llvm.BUILT build/python.BUILT build/python.OPT build/ruff.OPT
 	mkdir -p ${OUTPUT}/python/{bin,lib,include}
-	rsync -avL --exclude __pycache__ ${SYSROOT}/lib/python3.13 ${OUTPUT}/python/lib/
+	rsync -avL --exclude __pycache__ --exclude config-3.13-wasm32-wasi ${SYSROOT}/lib/python3.13 ${OUTPUT}/python/lib/
 	touch "$@"
 
 test: test.sh ${OUTPUT}/cpp.COPIED ${OUTPUT}/python.COPIED
