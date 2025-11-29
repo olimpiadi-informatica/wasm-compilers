@@ -1,5 +1,5 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index 0a3feac2e..3cb3e74d1 100644
+index e49d75444..93da6d684 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -483,7 +483,7 @@ version = "4.0.2"
@@ -37,7 +37,16 @@ index 0a3feac2e..3cb3e74d1 100644
  [[package]]
  name = "darling"
  version = "0.20.11"
-@@ -2020,18 +2010,6 @@ dependencies = [
+@@ -1452,8 +1442,6 @@ dependencies = [
+ [[package]]
+ name = "ignore"
+ version = "0.4.23"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "6d89fd380afde86567dfba715db065673989d6253f42b88179abd3eae47bda4b"
+ dependencies = [
+  "crossbeam-deque",
+  "globset",
+@@ -2020,18 +2008,6 @@ dependencies = [
   "libc",
  ]
  
@@ -56,7 +65,7 @@ index 0a3feac2e..3cb3e74d1 100644
  [[package]]
  name = "nom"
  version = "7.1.3"
-@@ -4197,7 +4175,6 @@ dependencies = [
+@@ -4198,7 +4174,6 @@ dependencies = [
   "clearscreen",
   "colored 3.0.0",
   "crossbeam",
@@ -64,19 +73,34 @@ index 0a3feac2e..3cb3e74d1 100644
   "dunce",
   "filetime",
   "indicatif",
+diff --git a/Cargo.toml b/Cargo.toml
+index bed513fe3..f653a70a6 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -293,3 +293,6 @@ debug = 1
+ # The profile that 'cargo dist' will build with.
+ [profile.dist]
+ inherits = "release"
++
++[patch.crates-io]
++ignore = { path = "../ripgrep/crates/ignore" }
 diff --git a/crates/ruff/src/cache.rs b/crates/ruff/src/cache.rs
-index d782d8c9e..cf20696b3 100644
+index 6b696b55d..3d9bf9f4b 100644
 --- a/crates/ruff/src/cache.rs
 +++ b/crates/ruff/src/cache.rs
-@@ -57,6 +57,8 @@ impl FileCacheKey {
+@@ -48,9 +48,11 @@ impl FileCacheKey {
          };
          #[cfg(windows)]
          let permissions: u32 = metadata.permissions().readonly().into();
 +        #[cfg(not(any(unix, windows)))]
-+        let permissions: u32 = 0644u32;
++        let permissions: u32 = 0755u32;
  
          Ok(FileCacheKey {
-             file_last_modified: FileTime::from_last_modification_time(&metadata),
+-            file_last_modified: FileTime::from_last_modification_time(&metadata),
++            file_last_modified: FileTime::zero(),
+             file_permissions_mode: permissions,
+         })
+     }
 diff --git a/crates/ruff/src/commands/add_noqa.rs b/crates/ruff/src/commands/add_noqa.rs
 index d5eaeb017..e39eee731 100644
 --- a/crates/ruff/src/commands/add_noqa.rs
@@ -127,6 +151,23 @@ index 0c0ed5995..e3f23831a 100644
  
      all_diagnostics
          .inner
+diff --git a/crates/ruff_workspace/src/resolver.rs b/crates/ruff_workspace/src/resolver.rs
+index 84a31ebbe..f7c1aef6e 100644
+--- a/crates/ruff_workspace/src/resolver.rs
++++ b/crates/ruff_workspace/src/resolver.rs
+@@ -486,12 +486,6 @@ pub fn python_files_in_path<'a>(
+     builder.standard_filters(resolver.respect_gitignore());
+     builder.hidden(false);
+ 
+-    builder.threads(
+-        std::thread::available_parallelism()
+-            .map_or(1, std::num::NonZeroUsize::get)
+-            .min(12),
+-    );
+-
+     let walker = builder.build_parallel();
+ 
+     // Run the `WalkParallel` to collect all Python files.
 diff --git a/crates/ty/Cargo.toml b/crates/ty/Cargo.toml
 index 4189758bb..fee054557 100644
 --- a/crates/ty/Cargo.toml
@@ -160,4 +201,3 @@ index f16192bcd..3a78e9849 100644
  
      let exit_status = if watch {
          main_loop.watch(&mut db)?
-

@@ -1,0 +1,22 @@
+diff --git a/crates/ignore/src/walk.rs b/crates/ignore/src/walk.rs
+index f697c50..cd0a729 100644
+--- a/crates/ignore/src/walk.rs
++++ b/crates/ignore/src/walk.rs
+@@ -424,10 +424,13 @@ impl DirEntryRaw {
+         pb: PathBuf,
+         link: bool,
+     ) -> Result<DirEntryRaw, Error> {
+-        Err(Error::Io(io::Error::new(
+-            io::ErrorKind::Other,
+-            "unsupported platform",
+-        )))
++        let m = fs::metadata(&pb)?;
++        Ok(DirEntryRaw {
++            path: pb,
++            ty: m.file_type(),
++            follow_link: link,
++            depth,
++        })
+     }
+ }
+ 

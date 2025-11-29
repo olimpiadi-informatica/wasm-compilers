@@ -44,6 +44,7 @@ build/llvm-host.BUILT: llvm-project | build
 		-DLLVM_TARGETS_TO_BUILD=WebAssembly -DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-wasip1-threads \
 		-DLLVM_ENABLE_PROJECTS="clang;lld"
 	$(MAKE) -C build/llvm-host-build install
+	rm -rf build/llvm-host-{build,src}
 	touch $@
 
 build/wasi-libc.BUILT: wasi-libc build/llvm-host.BUILT | build
@@ -161,6 +162,8 @@ build/python.BUILT: build/wasi-libc.BUILT build/llvm.BUILT
 build/ruff.SRC:
 	rsync -a --delete ruff/ build/ruff
 	cd build/ruff && patch -p1 < ../../ruff.patch
+	rsync -a --delete ripgrep/ build/ripgrep
+	cd build/ripgrep && patch -p1 < ../../ignore.patch
 	touch "$@"
 
 build/ruff.BUILT: build/python.BUILT build/ruff.SRC

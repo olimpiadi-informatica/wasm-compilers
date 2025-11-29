@@ -15,3 +15,6 @@
 [submodule "ruff"]
 	path = ruff
 	url = https://github.com/astral-sh/ruff.git
+[submodule "ripgrep"]
+	path = ripgrep
+	url = https://github.com/BurntSushi/ripgrep.git
