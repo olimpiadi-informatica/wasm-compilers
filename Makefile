@@ -54,6 +54,7 @@ build/wasi-libc.BUILT: wasi-libc build/llvm-host.BUILT | build
 	$(MAKE) -C build/wasi-libc THREAD_MODEL=posix \
 		CC=${WASM_CC} AR=$(WASM_AR) NM=${WASM_NM} EXTRA_CFLAGS="${WASI_CFLAGS} -O2 -DNDEBUG" \
 		INSTALL_DIR=${SYSROOT} install
+	rm -rf build/wasi-libc
 	touch $@
 
 build/llvm.SRC: llvm-project | build
@@ -74,6 +75,7 @@ build/compiler-rt-host.BUILT: build/llvm.SRC build/wasi-libc.BUILT
 	$(MAKE) -C build/compiler-rt-build-host install
 	mv ${LLVM_HOST}/lib/clang/$(CLANG_VERSION)/lib/${RT_DIR}/libclang_rt.builtins-wasm32.a \
 		${LLVM_HOST}/lib/clang/$(CLANG_VERSION)/lib/${RT_DIR}/libclang_rt.builtins.a
+	rm -rf build/compiler-rt-build-host
 	touch $@
 
 build/compiler-rt.BUILT: build/llvm.SRC build/compiler-rt-host.BUILT
@@ -90,6 +92,7 @@ build/compiler-rt.BUILT: build/llvm.SRC build/compiler-rt-host.BUILT
 	$(MAKE) -C build/compiler-rt-build install
 	mv ${SYSROOT}/lib/clang/$(CLANG_VERSION)/lib/${RT_DIR}/libclang_rt.builtins-wasm32.a \
 		${SYSROOT}/lib/clang/$(CLANG_VERSION)/lib/${RT_DIR}/libclang_rt.builtins.a
+	rm -rf build/compiler-rt-build
 	touch $@
 
 LIBSTDCXX_FLAGS = -fsized-deallocation -Wno-unknown-warning-option -Wno-vla-cxx-extension \
@@ -112,6 +115,7 @@ build/libstdcxx.BUILT: build/compiler-rt.BUILT
 	cd build/gcc-build && PATH=${LLVM_HOST}/bin:$$PATH $(MAKE) \
 		CFLAGS_FOR_TARGET="${WASM_CFLAGS} -fsized-deallocation" \
 		CXXFLAGS_FOR_TARGET="${WASM_CXXFLAGS}" install
+	rm -rf build/gcc-build
 	touch "$@"
 
 build/llvm.BUILT: build/llvm.SRC build/libstdcxx.BUILT
@@ -134,10 +138,10 @@ build/llvm.BUILT: build/llvm.SRC build/libstdcxx.BUILT
 		-DCMAKE_C_FLAGS_MINSIZEREL="-Oz -DNDEBUG" \
 		-DCMAKE_ASM_FLAGS_MINSIZEREL="-Oz -DNDEBUG"
 	$(MAKE) -C build/llvm-build install
+	rm -rf build/llvm-build
 	touch "$@"
 
-# Technically, this only needs wasi-libc, but errors get hidden otherwise.
-build/python.BUILT: build/wasi-libc.BUILT build/llvm.BUILT
+build/python.BUILT: build/wasi-libc.BUILT
 	rsync -a --delete cpython/ build/cpython
 	sed -i s/-Wl,--max-memory=10485760// build/cpython/configure
 	sed -i s/wasm32-wasi-threads/wasm32-wasip1-threads/g build/cpython/Misc/platform_triplet.c build/cpython/configure.ac build/cpython/configure
@@ -157,6 +161,7 @@ build/python.BUILT: build/wasi-libc.BUILT build/llvm.BUILT
 		--with-pkg-config=no \
 		CONFIG_SITE=${DIR}/cpython-config-override
 	$(MAKE) -C build/cpython/wasm-build install
+	rm -rf build/cpython
 	touch "$@"
 
 build/ruff.SRC:
@@ -166,7 +171,7 @@ build/ruff.SRC:
 	cd build/ripgrep && patch -p1 < ../../ignore.patch
 	touch "$@"
 
-build/ruff.BUILT: build/python.BUILT build/ruff.SRC
+build/ruff.BUILT: build/ruff.SRC
 	cd build/ruff && rustup target add wasm32-wasip1-threads
 	cd build/ruff && RUSTFLAGS="${RUST_OPT_FLAGS}" cargo build --target wasm32-wasip1-threads --release
 	touch "$@"
@@ -189,6 +194,7 @@ build/python.OPT: build/python.BUILT
 build/ruff.OPT: build/ruff.BUILT
 	mkdir -p ${OUTPUT}/python/bin
 	wasm-opt ${WASM_OPT_FLAGS} build/ruff/target/wasm32-wasip1-threads/release/ruff.wasm -o ${OUTPUT}/python/bin/ruff.wasm
+	rm -rf build/ruff
 	touch "$@"
 
 ${OUTPUT}/cpp.COPIED: build/llvm.BUILT build/cpp.clangd.OPT build/cpp.llvm.OPT
