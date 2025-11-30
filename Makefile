@@ -44,7 +44,7 @@ build/llvm-host.BUILT: llvm-project | build
 		-DLLVM_TARGETS_TO_BUILD=WebAssembly -DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-wasip1-threads \
 		-DLLVM_ENABLE_PROJECTS="clang;lld"
 	$(MAKE) -C build/llvm-host-build install
-	rm -rf build/llvm-host-{build,src}
+	rm -rf build/llvm-host-build
 	touch $@
 
 build/wasi-libc.BUILT: wasi-libc build/llvm-host.BUILT | build
@@ -141,7 +141,7 @@ build/llvm.BUILT: build/llvm.SRC build/libstdcxx.BUILT
 	rm -rf build/llvm-build
 	touch "$@"
 
-build/python.BUILT: build/wasi-libc.BUILT
+build/python.BUILT: cpython build/wasi-libc.BUILT
 	rsync -a --delete cpython/ build/cpython
 	sed -i s/-Wl,--max-memory=10485760// build/cpython/configure
 	sed -i s/wasm32-wasi-threads/wasm32-wasip1-threads/g build/cpython/Misc/platform_triplet.c build/cpython/configure.ac build/cpython/configure
@@ -164,7 +164,7 @@ build/python.BUILT: build/wasi-libc.BUILT
 	rm -rf build/cpython
 	touch "$@"
 
-build/ruff.SRC:
+build/ruff.SRC: ruff ruff.patch ignore.patch
 	rsync -a --delete ruff/ build/ruff
 	cd build/ruff && patch -p1 < ../../ruff.patch
 	rsync -a --delete ripgrep/ build/ripgrep
