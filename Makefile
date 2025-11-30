@@ -27,7 +27,7 @@ RUST_OPT_FLAGS := -Clink-args=--initial-memory=41943040 \
 
 WASM_OPT_FLAGS := -Oz -O4 -Oz -O4 -Oz
 
-MAKE := make
+MAKE := make -j$(shell nproc)
 
 RT_DIR := wasm32-unknown-wasip1-threads
 
@@ -41,9 +41,10 @@ build/llvm-host.BUILT: llvm-project | build
 	cmake -S build/llvm-host-src/llvm -B build/llvm-host-build \
 		-DCMAKE_INSTALL_PREFIX="${DIR}/build/llvm-host" -DDEFAULT_SYSROOT=${SYSROOT} \
 		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_CXX_FLAGS="-w" \
 		-DLLVM_TARGETS_TO_BUILD=WebAssembly -DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-wasip1-threads \
-		-DLLVM_ENABLE_PROJECTS="clang;lld"
-	$(MAKE) -C build/llvm-host-build install
+		-DLLVM_ENABLE_PROJECTS="clang;lld" -G Ninja
+	ninja -C build/llvm-host-build install
 	rm -rf build/llvm-host-build
 	touch $@
 
@@ -71,8 +72,9 @@ build/compiler-rt-host.BUILT: build/llvm.SRC build/wasi-libc.BUILT
 		-DCOMPILER_RT_HAS_FPIC_FLAG=OFF \
 		-DCOMPILER_RT_DEFAULT_TARGET_ONLY=On \
 		-DCOMPILER_RT_OS_DIR=${RT_DIR} \
-		-DCMAKE_INSTALL_PREFIX=${LLVM_HOST}/lib/clang/$(CLANG_VERSION)/
-	$(MAKE) -C build/compiler-rt-build-host install
+		-DCMAKE_INSTALL_PREFIX=${LLVM_HOST}/lib/clang/$(CLANG_VERSION)/ \
+		-G Ninja
+	ninja -C build/compiler-rt-build-host install
 	mv ${LLVM_HOST}/lib/clang/$(CLANG_VERSION)/lib/${RT_DIR}/libclang_rt.builtins-wasm32.a \
 		${LLVM_HOST}/lib/clang/$(CLANG_VERSION)/lib/${RT_DIR}/libclang_rt.builtins.a
 	rm -rf build/compiler-rt-build-host
@@ -88,8 +90,9 @@ build/compiler-rt.BUILT: build/llvm.SRC build/compiler-rt-host.BUILT
 		-DCOMPILER_RT_HAS_FPIC_FLAG=OFF \
 		-DCOMPILER_RT_DEFAULT_TARGET_ONLY=On \
 		-DCOMPILER_RT_OS_DIR=${RT_DIR} \
-		-DCMAKE_INSTALL_PREFIX=${SYSROOT}/lib/clang/$(CLANG_VERSION)/
-	$(MAKE) -C build/compiler-rt-build install
+		-DCMAKE_INSTALL_PREFIX=${SYSROOT}/lib/clang/$(CLANG_VERSION)/ \
+		-G Ninja
+	ninja -C build/compiler-rt-build install
 	mv ${SYSROOT}/lib/clang/$(CLANG_VERSION)/lib/${RT_DIR}/libclang_rt.builtins-wasm32.a \
 		${SYSROOT}/lib/clang/$(CLANG_VERSION)/lib/${RT_DIR}/libclang_rt.builtins.a
 	rm -rf build/compiler-rt-build
@@ -136,12 +139,13 @@ build/llvm.BUILT: build/llvm.SRC build/libstdcxx.BUILT
 		-DCMAKE_EXE_LINKER_FLAGS="${WASM_LDFLAGS}" \
 		-DCMAKE_CXX_FLAGS_MINSIZEREL="-Oz -DNDEBUG" \
 		-DCMAKE_C_FLAGS_MINSIZEREL="-Oz -DNDEBUG" \
-		-DCMAKE_ASM_FLAGS_MINSIZEREL="-Oz -DNDEBUG"
-	$(MAKE) -C build/llvm-build install
+		-DCMAKE_ASM_FLAGS_MINSIZEREL="-Oz -DNDEBUG" \
+		-G Ninja
+	ninja -C build/llvm-build install
 	rm -rf build/llvm-build
 	touch "$@"
 
-build/python.BUILT: cpython build/wasi-libc.BUILT
+build/python.BUILT: cpython build/wasi-libc.BUILT | build
 	rsync -a --delete cpython/ build/cpython
 	sed -i s/-Wl,--max-memory=10485760// build/cpython/configure
 	sed -i s/wasm32-wasi-threads/wasm32-wasip1-threads/g build/cpython/Misc/platform_triplet.c build/cpython/configure.ac build/cpython/configure
@@ -164,7 +168,7 @@ build/python.BUILT: cpython build/wasi-libc.BUILT
 	rm -rf build/cpython
 	touch "$@"
 
-build/ruff.SRC: ruff ruff.patch ignore.patch
+build/ruff.SRC: ruff ruff.patch ignore.patch | build
 	rsync -a --delete ruff/ build/ruff
 	cd build/ruff && patch -p1 < ../../ruff.patch
 	rsync -a --delete ripgrep/ build/ripgrep

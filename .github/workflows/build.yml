@@ -17,7 +17,7 @@ jobs:
       - name: Install Deps
         run: |
           sudo apt update
-          sudo apt install -yy build-essential clang brotli binaryen
+          sudo apt install -yy build-essential clang brotli binaryen ninja-build gcc-multilib
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install wasmtime
@@ -27,8 +27,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - name: Build
-        run: make -j$(nproc)
+      - name: Install wasm32-wasip1-threads Rust target
+        run: rustup target add wasm32-wasip1-threads
+      - name: Build Ruff
+        run: make build/ruff.BUILT
+      - name: Build host tools
+        run: make build/llvm-host.BUILT
+      - name: Build C++ compiler
+        run: make build/llvm.BUILT
+      - name: Build Python
+        run: make build/python.BUILT
+      - name: Finalize build
+        run: make
       - name: Upload built compilers
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
