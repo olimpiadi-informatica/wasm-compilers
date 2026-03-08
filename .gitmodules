@@ -18,3 +18,6 @@
 [submodule "ripgrep"]
 	path = ripgrep
 	url = https://github.com/BurntSushi/ripgrep.git
+[submodule "filetime"]
+	path = filetime
+	url = https://github.com/alexcrichton/filetime.git
