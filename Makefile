@@ -168,16 +168,18 @@ build/python.BUILT: cpython build/wasi-libc.BUILT | build
 	rm -rf build/cpython
 	touch "$@"
 
-build/ruff.SRC: ruff ruff.patch ignore.patch | build
+build/ruff.SRC: ruff ruff.patch ignore.patch filetime.patch | build
 	rsync -a --delete ruff/ build/ruff
 	cd build/ruff && patch -p1 < ../../ruff.patch
 	rsync -a --delete ripgrep/ build/ripgrep
 	cd build/ripgrep && patch -p1 < ../../ignore.patch
+	rsync -a --delete filetime/ build/filetime
+	cd build/filetime && patch -p1 < ../../filetime.patch
 	touch "$@"
 
-build/ruff.BUILT: build/ruff.SRC
+build/ty.BUILT: build/ruff.SRC
 	cd build/ruff && rustup target add wasm32-wasip1-threads
-	cd build/ruff && RUSTFLAGS="${RUST_OPT_FLAGS}" cargo build --target wasm32-wasip1-threads --release
+	cd build/ruff/crates/ty && RUSTFLAGS="${RUST_OPT_FLAGS}" cargo build --target wasm32-wasip1-threads --release
 	touch "$@"
 
 build/cpp.clangd.OPT: build/llvm.BUILT
@@ -195,10 +197,9 @@ build/python.OPT: build/python.BUILT
 	wasm-opt ${WASM_OPT_FLAGS} ${SYSROOT}/bin/python3.13.wasm -o ${OUTPUT}/python/bin/python3.13.wasm
 	touch "$@"
 
-build/ruff.OPT: build/ruff.BUILT
+build/ty.OPT: build/ty.BUILT
 	mkdir -p ${OUTPUT}/python/bin
-	wasm-opt ${WASM_OPT_FLAGS} build/ruff/target/wasm32-wasip1-threads/release/ruff.wasm -o ${OUTPUT}/python/bin/ruff.wasm
-	rm -rf build/ruff
+	wasm-opt ${WASM_OPT_FLAGS} build/ruff/target/wasm32-wasip1-threads/release/ty.wasm -o ${OUTPUT}/python/bin/ty.wasm
 	touch "$@"
 
 ${OUTPUT}/cpp.COPIED: build/llvm.BUILT build/cpp.clangd.OPT build/cpp.llvm.OPT
@@ -209,7 +210,7 @@ ${OUTPUT}/cpp.COPIED: build/llvm.BUILT build/cpp.clangd.OPT build/cpp.llvm.OPT
 	mkdir -p ${OUTPUT}/cpp/include/bits
 	touch "$@"
 
-${OUTPUT}/python.COPIED: build/llvm.BUILT build/python.BUILT build/python.OPT build/ruff.OPT
+${OUTPUT}/python.COPIED: build/llvm.BUILT build/python.BUILT build/python.OPT build/ty.OPT
 	mkdir -p ${OUTPUT}/python/{bin,lib,include}
 	rsync -avL --exclude __pycache__ --exclude config-3.13-wasm32-wasi ${SYSROOT}/lib/python3.13 ${OUTPUT}/python/lib/
 	touch "$@"
@@ -221,7 +222,7 @@ test: test.sh ${OUTPUT}/cpp.COPIED ${OUTPUT}/python.COPIED
 	tar c -C $* . > $@
 
 %.tar.br: %.tar
-	brotli $<
+	brotli -f $<
 
 ${OUTPUT}.DONE: ${OUTPUT}/cpp.tar.br ${OUTPUT}/python.tar.br
 
