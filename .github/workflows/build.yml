@@ -29,8 +29,8 @@ jobs:
           submodules: true
       - name: Install wasm32-wasip1-threads Rust target
         run: rustup target add wasm32-wasip1-threads
-      - name: Build Ruff
-        run: make build/ruff.BUILT
+      - name: Build ty
+        run: make build/ty.BUILT
       - name: Build host tools
         run: make build/llvm-host.BUILT
       - name: Build C++ compiler
