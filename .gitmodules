@@ -10,8 +10,7 @@
 	branch = wasi-build
 [submodule "gcc"]
 	path = gcc
-	url = https://github.com/veluca93/gcc.git
-	branch = master 
+	url = https://github.com/gcc-mirror/gcc.git
 [submodule "ruff"]
 	path = ruff
 	url = https://github.com/astral-sh/ruff.git
