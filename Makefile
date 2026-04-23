@@ -104,8 +104,9 @@ LIBSTDCXX_FLAGS = -fsized-deallocation -Wno-unknown-warning-option -Wno-vla-cxx-
 		-Wno-unused-parameter -fno-exceptions -Wno-init-priority-reserved \
 		-Wno-invalid-constexpr
 
-build/libstdcxx.BUILT: build/compiler-rt.BUILT
+build/libstdcxx.BUILT: build/compiler-rt.BUILT gcc.patch
 	rsync -a --delete gcc/ build/gcc
+	cd build/gcc && patch -p1 < ../../gcc.patch
 	mkdir -p build/gcc-build
 	cd build/gcc-build && \
 		PATH=${LLVM_HOST}/bin:$$PATH LDFLAGS="${WASM_LDFLAGS}" \
