@@ -110,6 +110,19 @@ index 20901b7fc06..4fc74a3e97b 100644
  #pragma GCC system_header
  
  #include <bits/c++config.h>
+diff --git a/libstdc++-v3/include/bits/chrono.h b/libstdc++-v3/include/bits/chrono.h
+index 0773867da71..b868ec95847 100644
+--- a/libstdc++-v3/include/bits/chrono.h
++++ b/libstdc++-v3/include/bits/chrono.h
+@@ -1284,7 +1284,7 @@ _GLIBCXX_BEGIN_INLINE_ABI_NAMESPACE(_V2)
+      *  become feasible.
+      *  @ingroup chrono
+     */
+-    using high_resolution_clock = system_clock;
++    using high_resolution_clock = steady_clock;
+ 
+ _GLIBCXX_END_INLINE_ABI_NAMESPACE(_V2)
+ 
 diff --git a/libstdc++-v3/include/bits/stl_tempbuf.h b/libstdc++-v3/include/bits/stl_tempbuf.h
 index fa03fd27704..0afa7f499f9 100644
 --- a/libstdc++-v3/include/bits/stl_tempbuf.h
@@ -490,27 +503,6 @@ index 6d99c7958f3..ce568d836ee 100644
    void
    __glibcxx_assert_fail(const char* file, int line,
  			const char* function, const char* condition) noexcept
-diff --git a/libstdc++-v3/src/c++11/chrono.cc b/libstdc++-v3/src/c++11/chrono.cc
-index 7f56c893b90..60f39cab93c 100644
---- a/libstdc++-v3/src/c++11/chrono.cc
-+++ b/libstdc++-v3/src/c++11/chrono.cc
-@@ -24,6 +24,7 @@
- 
- #include <bits/c++config.h>
- #include <chrono>
-+#include <stdio.h>
- 
- // Conditional inclusion of sys/time.h for gettimeofday
- #if !defined(_GLIBCXX_USE_CLOCK_MONOTONIC) && \
-@@ -51,7 +52,7 @@ _GLIBCXX_BEGIN_INLINE_ABI_NAMESPACE(_V2)
-     system_clock::now() noexcept
-     {
- #ifdef _GLIBCXX_USE_CLOCK_REALTIME
--      timespec tp;
-+      timespec tp = {};
-       // -EINVAL, -EFAULT
- #ifdef _GLIBCXX_USE_CLOCK_GETTIME_SYSCALL
-       syscall(SYS_clock_gettime, CLOCK_REALTIME, &tp);
 diff --git a/libstdc++-v3/src/c++23/print.cc b/libstdc++-v3/src/c++23/print.cc
 index 99a19cd4500..b193d569024 100644
 --- a/libstdc++-v3/src/c++23/print.cc
