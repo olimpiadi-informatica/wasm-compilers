@@ -203,8 +203,7 @@ build/ty.OPT: build/ty.BUILT
 	wasm-opt ${WASM_OPT_FLAGS} build/ruff/target/wasm32-wasip1-threads/release/ty.wasm -o ${OUTPUT}/python/bin/ty.wasm
 	touch "$@"
 
-${OUTPUT}/cpp.COPIED: build/llvm.BUILT build/cpp.clangd.OPT build/cpp.llvm.OPT
-	mkdir -p ${OUTPUT}/cpp/{bin,lib,include}
+${OUTPUT}/cpp.COPIED: build/libstdcxx.BUILT build/llvm.BUILT build/cpp.clangd.OPT build/cpp.llvm.OPT
 	rsync -avL ${SYSROOT}/lib/clang ${SYSROOT}/lib/wasm32-wasip1-threads ${OUTPUT}/cpp/lib/
 	rsync -avL ${SYSROOT}/include/c++ ${SYSROOT}/include/wasm32-wasip1-threads ${OUTPUT}/cpp/include/
 	rsync -avL ${SYSROOT}/lib/libsupc++.a ${SYSROOT}/lib/libstdc++.a ${OUTPUT}/cpp/lib/
@@ -212,7 +211,6 @@ ${OUTPUT}/cpp.COPIED: build/llvm.BUILT build/cpp.clangd.OPT build/cpp.llvm.OPT
 	touch "$@"
 
 ${OUTPUT}/python.COPIED: build/llvm.BUILT build/python.BUILT build/python.OPT build/ty.OPT
-	mkdir -p ${OUTPUT}/python/{bin,lib,include}
 	rsync -avL --exclude __pycache__ --exclude config-3.13-wasm32-wasi ${SYSROOT}/lib/python3.13 ${OUTPUT}/python/lib/
 	touch "$@"
 
