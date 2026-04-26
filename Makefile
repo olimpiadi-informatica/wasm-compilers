@@ -102,7 +102,7 @@ LIBSTDCXX_FLAGS = -fsized-deallocation -Wno-unknown-warning-option -Wno-vla-cxx-
 		-Wno-unused-function -Wno-instantiation-after-specialization \
 		-Wno-missing-braces -Wno-unused-variable -Wno-string-plus-int \
 		-Wno-unused-parameter -fno-exceptions -Wno-init-priority-reserved \
-		-Wno-invalid-constexpr
+		-Wno-invalid-constexpr -nostdlib++
 
 build/libstdcxx.BUILT: build/compiler-rt.BUILT gcc.patch
 	rsync -a --delete gcc/ build/gcc
@@ -210,7 +210,7 @@ ${OUTPUT}/cpp.COPIED: build/libstdcxx.BUILT build/llvm.BUILT build/cpp.clangd.OP
 	mkdir -p ${OUTPUT}/cpp/include/bits
 	touch "$@"
 
-${OUTPUT}/python.COPIED: build/llvm.BUILT build/python.BUILT build/python.OPT build/ty.OPT
+${OUTPUT}/python.COPIED: build/python.BUILT build/python.OPT build/ty.OPT
 	rsync -avL --exclude __pycache__ --exclude config-3.13-wasm32-wasi ${SYSROOT}/lib/python3.13 ${OUTPUT}/python/lib/
 	touch "$@"
 
