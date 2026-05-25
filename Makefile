@@ -18,7 +18,7 @@ WASM_CXXFLAGS := -ffile-prefix-map=${DIR}=/ -matomics -mbulk-memory -mmutable-gl
 WASM_LDFLAGS := -Wl,-z -Wl,stack-size=10485760 \
                 ``-Wl,--shared-memory -Wl,--export-memory -Wl,--import-memory \
                 ``-Wl,--max-memory=4294967296 \
-                ``-Wl,--initial-memory=41943040 \
+                ``-Wl,--initial-memory=419430400 \
                 ``-L${SYSROOT}/lib/
 
 RUST_OPT_FLAGS := -Clink-args=--initial-memory=41943040 \
@@ -42,8 +42,11 @@ build/llvm-host.BUILT: llvm-project | build
 		-DCMAKE_INSTALL_PREFIX="${DIR}/build/llvm-host" -DDEFAULT_SYSROOT=${SYSROOT} \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_CXX_FLAGS="-w" \
-		-DLLVM_TARGETS_TO_BUILD=WebAssembly -DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-wasip1-threads \
-		-DLLVM_ENABLE_PROJECTS="clang;lld" -G Ninja
+		-DLLVM_TARGETS_TO_BUILD="WebAssembly;X86" \
+		-DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-wasip1-threads \
+		-DLLVM_ENABLE_PROJECTS="clang;lld" \
+		-DLLVM_INSTALL_UTILS=ON \
+		-G Ninja
 	ninja -C build/llvm-host-build install
 	rm -rf build/llvm-host-build
 	touch $@
@@ -129,10 +132,10 @@ build/llvm.BUILT: build/llvm.SRC build/libstdcxx.BUILT
 		-DWASM_PREFIX=${LLVM_HOST} -DCMAKE_TOOLCHAIN_FILE=${DIR}/cmake/toolchain.cmake \
 		-DCMAKE_C_FLAGS="-I${DIR} ${WASM_CFLAGS}" \
 		-DCMAKE_CXX_FLAGS="-I${DIR} ${WASM_CXXFLAGS} -fno-exceptions" \
-		-DLLVM_TARGETS_TO_BUILD=WebAssembly -DLLVM_ENABLE_PROJECTS="clang;lld;clang-tools-extra" \
+		-DLLVM_ENABLE_PROJECTS="clang;lld;clang-tools-extra" \
 		-DLLVM_INCLUDE_BENCHMARKS=OFF \
-		-DLLVM_TARGETS_TO_BUILD=WebAssembly \
 		-DLLVM_TOOL_LLVM_DRIVER_BUILD=ON \
+		-DLLVM_TARGETS_TO_BUILD="WebAssembly;X86" \
 		-DLLVM_DEFAULT_TARGET_TRIPLE=wasm32-wasip1-threads \
 		-DLLVM_INCLUDE_TESTS=OFF -DCLANG_PLUGIN_SUPPORT=OFF \
 		-DLLVM_BUILD_LLVM_DYLIB=OFF -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_ENABLE_PIC=OFF \
@@ -141,9 +144,9 @@ build/llvm.BUILT: build/llvm.SRC build/libstdcxx.BUILT
 		-DCMAKE_CXX_FLAGS_MINSIZEREL="-Oz -DNDEBUG" \
 		-DCMAKE_C_FLAGS_MINSIZEREL="-Oz -DNDEBUG" \
 		-DCMAKE_ASM_FLAGS_MINSIZEREL="-Oz -DNDEBUG" \
+		-DLLVM_ENABLE_PLUGINS=OFF -DHAVE_DLOPEN=0 \
 		-G Ninja
 	ninja -C build/llvm-build install
-	rm -rf build/llvm-build
 	touch "$@"
 
 build/python.BUILT: cpython build/wasi-libc.BUILT | build
@@ -183,6 +186,13 @@ build/ty.BUILT: build/ruff.SRC
 	cd build/ruff/crates/ty && RUSTFLAGS="${RUST_OPT_FLAGS}" cargo build --target wasm32-wasip1-threads --release
 	touch "$@"
 
+build/rust.BUILT: build/llvm-host.BUILT build/compiler-rt-host.BUILT rust.patch
+	rsync -a --delete rust/ build/rust
+	cd build/rust && patch -p1 < ../../rust.patch
+	sed "s|%PWD%|$$PWD|" -i build/rust/config.toml build/rust/wasi-clang++.sh build/rust/wasi-ld.sh build/rust/wasm-llvm-config.sh
+	cd build/rust && ./x.py build compiler std --host wasm32-wasip1-threads --stage 2
+	touch "$@"
+
 build/cpp.clangd.OPT: build/llvm.BUILT
 	mkdir -p ${OUTPUT}/cpp/bin
 	wasm-opt ${WASM_OPT_FLAGS} ${SYSROOT}/bin/clangd -o ${OUTPUT}/cpp/bin/clangd
@@ -203,6 +213,11 @@ build/ty.OPT: build/ty.BUILT
 	wasm-opt ${WASM_OPT_FLAGS} build/ruff/target/wasm32-wasip1-threads/release/ty.wasm -o ${OUTPUT}/python/bin/ty.wasm
 	touch "$@"
 
+build/rust.OPT: build/rust.BUILT
+	mkdir -p ${OUTPUT}/rust/bin
+	wasm-opt --enable-nontrapping-float-to-int --enable-threads --enable-bulk-memory ${WASM_OPT_FLAGS} build/rust/build/wasm32-wasip1-threads/stage2/bin/rustc.wasm -o ${OUTPUT}/rust/bin/rustc
+	touch "$@"
+
 ${OUTPUT}/cpp.COPIED: build/libstdcxx.BUILT build/llvm.BUILT build/cpp.clangd.OPT build/cpp.llvm.OPT
 	rsync -avL ${SYSROOT}/lib/clang ${SYSROOT}/lib/wasm32-wasip1-threads ${OUTPUT}/cpp/lib/
 	rsync -avL ${SYSROOT}/include/c++ ${SYSROOT}/include/wasm32-wasip1-threads ${OUTPUT}/cpp/include/
@@ -214,7 +229,14 @@ ${OUTPUT}/python.COPIED: build/python.BUILT build/python.OPT build/ty.OPT
 	rsync -avL --exclude __pycache__ --exclude config-3.13-wasm32-wasi ${SYSROOT}/lib/python3.13 ${OUTPUT}/python/lib/
 	touch "$@"
 
-test: test.sh ${OUTPUT}/cpp.COPIED ${OUTPUT}/python.COPIED
+${OUTPUT}/rust.COPIED: build/rust.OPT build/rust.BUILT
+	mkdir -p ${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib
+	cp -r build/rust/build/wasm32-wasip1-threads/stage2/lib/* ${OUTPUT}/rust/lib
+	cp -r build/rust/build/host/stage2/lib/rustlib/wasm32-wasip1-threads/lib/* ${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib
+	rm -rf ${OUTPUT}/rust/lib/rustlib/rustc-src ${OUTPUT}/rust/lib/rustlib/src
+	touch "$@"
+
+test: test.sh ${OUTPUT}/cpp.COPIED ${OUTPUT}/python.COPIED ${OUTPUT}/rust.COPIED
 	./test.sh
 
 %.tar: %.COPIED
@@ -223,7 +245,7 @@ test: test.sh ${OUTPUT}/cpp.COPIED ${OUTPUT}/python.COPIED
 %.tar.br: %.tar
 	brotli -f $<
 
-${OUTPUT}.DONE: ${OUTPUT}/cpp.tar.br ${OUTPUT}/python.tar.br
+${OUTPUT}.DONE: ${OUTPUT}/cpp.tar.br ${OUTPUT}/python.tar.br ${OUTPUT}/rust.tar.br
 
 clean:
 	rm -rf build/ cpython/cross-build

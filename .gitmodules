@@ -20,3 +20,6 @@
 [submodule "filetime"]
 	path = filetime
 	url = https://github.com/alexcrichton/filetime.git
+[submodule "rust"]
+	path = rust
+	url = https://github.com/rust-lang/rust.git

@@ -6,6 +6,9 @@ on:
     branches:
       - main
       - ci
+  pull_request:
+    branches:
+      - main
 
 jobs:
   build-artifacts:
@@ -24,19 +27,19 @@ jobs:
         run: cargo install wasmtime-cli
       - name: Test wasmtime installation
         run: which wasmtime
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
       - name: Install wasm32-wasip1-threads Rust target
         run: rustup target add wasm32-wasip1-threads
-      - name: Build ty
-        run: make build/ty.BUILT
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Build host tools
         run: make build/llvm-host.BUILT
+      - name: Build Rust
+        run: make build/rust.BUILT
       - name: Build C++ compiler
         run: make build/llvm.BUILT
       - name: Build Python
-        run: make build/python.BUILT
+        run: make build/python.BUILT build/ty.BUILT
       - name: Finalize build
         run: make
       - name: Upload built compilers
