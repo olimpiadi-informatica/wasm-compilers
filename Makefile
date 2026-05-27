@@ -36,8 +36,9 @@ all: ${OUTPUT}.DONE test
 build:
 	mkdir -p build
 
-build/llvm-host.BUILT: llvm-project | build
+build/llvm-host.BUILT: llvm-project llvm.patch | build
 	rsync -a --delete llvm-project/ build/llvm-host-src
+	cd build/llvm-host-src && patch -p1 < ../../llvm.patch
 	cmake -S build/llvm-host-src/llvm -B build/llvm-host-build \
 		-DCMAKE_INSTALL_PREFIX="${DIR}/build/llvm-host" -DDEFAULT_SYSROOT=${SYSROOT} \
 		-DCMAKE_BUILD_TYPE=Release \
@@ -48,7 +49,7 @@ build/llvm-host.BUILT: llvm-project | build
 		-DLLVM_INSTALL_UTILS=ON \
 		-G Ninja
 	ninja -C build/llvm-host-build install
-	rm -rf build/llvm-host-build
+	rm -rf build/llvm-host-build build/llvm-host-src
 	touch $@
 
 build/wasi-libc.BUILT: wasi-libc build/llvm-host.BUILT | build
@@ -61,8 +62,9 @@ build/wasi-libc.BUILT: wasi-libc build/llvm-host.BUILT | build
 	rm -rf build/wasi-libc
 	touch $@
 
-build/llvm.SRC: llvm-project | build
+build/llvm.SRC: llvm-project llvm.patch | build
 	rsync -a --delete llvm-project/ build/llvm-src
+	cd build/llvm-src && patch -p1 < ../../llvm.patch
 	touch $@
 
 build/compiler-rt-host.BUILT: build/llvm.SRC build/wasi-libc.BUILT
@@ -122,7 +124,7 @@ build/libstdcxx.BUILT: build/compiler-rt.BUILT gcc.patch
 	cd build/gcc-build && PATH=${LLVM_HOST}/bin:$$PATH $(MAKE) \
 		CFLAGS_FOR_TARGET="${WASM_CFLAGS} -fsized-deallocation" \
 		CXXFLAGS_FOR_TARGET="${WASM_CXXFLAGS}" install
-	rm -rf build/gcc-build
+	rm -rf build/gcc-build build/gcc
 	touch "$@"
 
 build/llvm.BUILT: build/llvm.SRC build/libstdcxx.BUILT
@@ -186,7 +188,7 @@ build/ty.BUILT: build/ruff.SRC
 	cd build/ruff/crates/ty && RUSTFLAGS="${RUST_OPT_FLAGS}" cargo build --target wasm32-wasip1-threads --release
 	touch "$@"
 
-build/rust.BUILT: build/llvm-host.BUILT build/compiler-rt-host.BUILT rust.patch
+build/rust.BUILT: build/llvm-host.BUILT build/libstdcxx.BUILT build/llvm.BUILT rust.patch
 	rsync -a --delete rust/ build/rust
 	cd build/rust && patch -p1 < ../../rust.patch
 	sed "s|%PWD%|$$PWD|" -i build/rust/config.toml build/rust/wasi-clang++.sh build/rust/wasi-ld.sh build/rust/wasm-llvm-config.sh
@@ -215,7 +217,7 @@ build/ty.OPT: build/ty.BUILT
 
 build/rust.OPT: build/rust.BUILT
 	mkdir -p ${OUTPUT}/rust/bin
-	wasm-opt --enable-nontrapping-float-to-int --enable-threads --enable-bulk-memory ${WASM_OPT_FLAGS} build/rust/build/wasm32-wasip1-threads/stage2/bin/rustc.wasm -o ${OUTPUT}/rust/bin/rustc
+	wasm-opt --enable-sign-ext --enable-nontrapping-float-to-int --enable-threads --enable-bulk-memory ${WASM_OPT_FLAGS} build/rust/build/wasm32-wasip1-threads/stage2/bin/rustc.wasm -o ${OUTPUT}/rust/bin/rustc
 	touch "$@"
 
 ${OUTPUT}/cpp.COPIED: build/libstdcxx.BUILT build/llvm.BUILT build/cpp.clangd.OPT build/cpp.llvm.OPT
