@@ -5,17 +5,17 @@ set -xe
 ROOT=$PWD/build/output
 CPPROOT=$ROOT/cpp
 PYROOT=$ROOT/python
+RSROOT=$ROOT/rust
+
+DIR=build/test
 
 $(which wasmtime) -W threads=y -S threads=y -W shared-memory=y --dir $PYROOT::/ \
   --env PYTHONPATH=/lib/python-3.13 \
   $PYROOT/bin/python3.13.wasm \
   -c "import json; print(json.dumps('hello'))"
 
-DIR=build/test
-
-rm -rf $DIR
 mkdir -p $DIR
-cp -r $CPPROOT/* $DIR
+rsync -aL --delete $CPPROOT/ $DIR/
 
 cat >$DIR/main.cc <<EOF
 #include <bits/stdc++.h>
@@ -51,3 +51,27 @@ $(which wasmtime) -W threads=y -S threads=y -W shared-memory=y --dir $DIR::/ \
   main.wasm -o main
 
 $(which wasmtime) -W threads=y -S threads=y -W shared-memory=y $DIR/main a b c d <<<13845
+
+rsync -aL --delete $RSROOT/ $DIR/
+
+cat >$DIR/main.rs <<EOF
+fn main() {
+    let mem = Box::new('exit: loop {
+        break 'exit 5;
+    });
+    println!("Hello from a WebAssembly-compiled Rust compiler! {mem}");
+}
+EOF
+
+$(which wasmtime) -W threads=y -W shared-memory=y -S threads=y --dir $DIR::/ \
+  $DIR/bin/rustc \
+  --target wasm32-wasip1-threads \
+  --sysroot / \
+  -Zno-parallel-backend \
+  -Z threads=1 \
+  -C codegen-units=1 \
+  -C target-feature=+atomics,+bulk-memory,+mutable-globals \
+  main.rs
+
+$(which wasmtime) -W threads=y -S threads=y -W shared-memory=y --dir $DIR::/ \
+  $DIR/main.wasm
