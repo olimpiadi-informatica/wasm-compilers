@@ -29,7 +29,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install wasmtime
-        run: cargo install wasmtime-cli
+        run: cargo install --version 36.0.13 wasmtime-cli
       - name: Test wasmtime installation
         run: which wasmtime
       - name: Install wasm32-wasip1-threads Rust target
