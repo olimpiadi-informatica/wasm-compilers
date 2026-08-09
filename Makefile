@@ -33,6 +33,11 @@ RT_DIR := wasm32-unknown-wasip1-threads
 
 all: ${OUTPUT}.DONE test
 
+base: build/libstdcxx.BUILT
+cpp: ${OUTPUT}/cpp.tar.br
+python: ${OUTPUT}/python.tar.br
+rust: ${OUTPUT}/rust.tar.br
+
 build:
 	mkdir -p build
 
@@ -252,6 +257,6 @@ ${OUTPUT}.DONE: ${OUTPUT}/cpp.tar.br ${OUTPUT}/python.tar.br ${OUTPUT}/rust.tar.
 clean:
 	rm -rf build/ cpython/cross-build
 
-.PHONY: all test clean
+.PHONY: all test clean base cpp python rust
 
 .NOTINTERMEDIATE:
