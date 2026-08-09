@@ -2910,7 +2910,7 @@ index 00000000000..fdfcaa2ef4b
 +NATIVE_LLVM_CONFIG="%PWD%/build/llvm-host/bin/llvm-config"
 +
 +# 2. The WASI LLVM you built
-+WASI_LLVM_PREFIX="%PWD%/build/llvm-build"
++WASI_LLVM_PREFIX="%PWD%/build/sysroot"
 +
 +# Get the native prefix
 +NATIVE_PREFIX=$($NATIVE_LLVM_CONFIG --prefix)

@@ -16,11 +16,144 @@ permissions:
   contents: write
 
 jobs:
-  build-artifacts:
-    name: Build artifacts
+  build-base:
+    name: Build Base Sysroot & Host Tools
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
+    steps:
+      - name: Install Deps
+        run: |
+          sudo apt update
+          sudo apt install -yy build-essential clang brotli binaryen ninja-build gcc-multilib
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Build Base Sysroot
+        run: make base
+      - name: Package Base Sysroot Artifact
+        run: |
+          tar -czf base-sysroot.tar.gz build/llvm-host build/sysroot build/*.BUILT
+      - name: Upload Base Sysroot Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: base-sysroot
+          path: base-sysroot.tar.gz
+          retention-days: 1
+
+  build-python:
+    name: Build Python Compiler
+    needs: build-base
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install Deps
+        run: |
+          sudo apt update
+          sudo apt install -yy build-essential clang brotli binaryen ninja-build gcc-multilib
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install wasm32-wasip1-threads Rust target
+        run: rustup target add wasm32-wasip1-threads
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Download Base Sysroot
+        uses: actions/download-artifact@v4
+        with:
+          name: base-sysroot
+      - name: Extract Base Sysroot
+        run: |
+          tar -xzf base-sysroot.tar.gz
+          touch build/*.BUILT
+      - name: Build Python Target
+        run: make python
+      - name: Upload Python Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-artifact
+          path: build/output/python.tar.br
+          retention-days: 1
+
+  build-cpp:
+    name: Build C++ Compiler
+    needs: build-base
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install Deps
+        run: |
+          sudo apt update
+          sudo apt install -yy build-essential clang brotli binaryen ninja-build gcc-multilib
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Download Base Sysroot
+        uses: actions/download-artifact@v4
+        with:
+          name: base-sysroot
+      - name: Extract Base Sysroot
+        run: |
+          tar -xzf base-sysroot.tar.gz
+          touch build/*.BUILT
+      - name: Build C++ Target
+        run: make cpp
+      - name: Upload C++ Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-artifact
+          path: build/output/cpp.tar.br
+          retention-days: 1
+      - name: Package LLVM Build (for Rust)
+        run: |
+          tar -czf llvm-build.tar.gz build/llvm-build build/llvm-src build/sysroot build/*.BUILT build/*.SRC
+      - name: Upload LLVM Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm-build
+          path: llvm-build.tar.gz
+          retention-days: 1
+
+  build-rust:
+    name: Build Rust Compiler
+    needs: [build-base, build-cpp]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install Deps
+        run: |
+          sudo apt update
+          sudo apt install -yy build-essential clang brotli binaryen ninja-build gcc-multilib
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install wasm32-wasip1-threads Rust target
+        run: rustup target add wasm32-wasip1-threads
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: More checkout
+        run: cd rust && git submodule update --init library/backtrace
+      - name: Download Base Sysroot
+        uses: actions/download-artifact@v4
+        with:
+          name: base-sysroot
+      - name: Download LLVM Build
+        uses: actions/download-artifact@v4
+        with:
+          name: llvm-build
+      - name: Extract Artifacts
+        run: |
+          tar -xzf base-sysroot.tar.gz
+          tar -xzf llvm-build.tar.gz
+          touch build/*.BUILT build/*.SRC
+      - name: Build Rust Target
+        run: make rust
+      - name: Upload Rust Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-artifact
+          path: build/output/rust.tar.br
+          retention-days: 1
+
+  test-and-release:
+    name: Test and Release
+    needs: [build-python, build-cpp, build-rust]
+    runs-on: ubuntu-24.04
     steps:
       - name: Install Deps
         run: |
@@ -30,31 +163,22 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Install wasmtime
         run: cargo install --version 36.0.13 wasmtime-cli
-      - name: Test wasmtime installation
-        run: which wasmtime
-      - name: Install wasm32-wasip1-threads Rust target
-        run: rustup target add wasm32-wasip1-threads
       - uses: actions/checkout@v4
+      - name: Download All Compiler Artifacts
+        uses: actions/download-artifact@v4
         with:
-          submodules: true
-      - name: More checkout
-        run: cd rust && git submodule update --init library/backtrace
-      - name: Build host tools
-        run: make build/llvm-host.BUILT
-      - name: Build C++ compiler
-        run: make build/llvm.BUILT
-      - name: Build Python
-        run: make build/python.BUILT build/ty.BUILT
-      - name: Build Rust
-        run: make build/rust.BUILT
-      - name: Finalize build
-        run: make -j2
-      - name: Upload built compilers
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: compilers
-          path: build/output/*.tar.br
-          compression-level: 0
+          path: downloaded-artifacts
+      - name: Prepare Artifacts for Testing & Release
+        run: |
+          mkdir -p build/output/cpp build/output/python build/output/rust
+          cp downloaded-artifacts/cpp-artifact/cpp.tar.br build/output/
+          cp downloaded-artifacts/python-artifact/python.tar.br build/output/
+          cp downloaded-artifacts/rust-artifact/rust.tar.br build/output/
+          brotli -d build/output/cpp.tar.br -c | tar -x -C build/output/cpp
+          brotli -d build/output/python.tar.br -c | tar -x -C build/output/python
+          brotli -d build/output/rust.tar.br -c | tar -x -C build/output/rust
+      - name: Run Test Suite
+        run: ./test.sh
       - name: Upload release artifacts
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
