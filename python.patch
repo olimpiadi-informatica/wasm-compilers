@@ -1,0 +1,79 @@
+diff --git a/Misc/platform_triplet.c b/Misc/platform_triplet.c
+index f5cd73bdea8..36061b69668 100644
+--- a/Misc/platform_triplet.c
++++ b/Misc/platform_triplet.c
+@@ -270,7 +270,7 @@ PLATFORM_TRIPLET=vxworks
+ PLATFORM_TRIPLET=wasm32-emscripten
+ #  elif defined(__wasi__)
+ #    if defined(_REENTRANT)
+-PLATFORM_TRIPLET=wasm32-wasi-threads
++PLATFORM_TRIPLET=wasm32-wasip1-threads
+ #    else
+ PLATFORM_TRIPLET=wasm32-wasi
+ #    endif
+diff --git a/Python/bltinmodule.c b/Python/bltinmodule.c
+index cc93424664c..a7b212fca21 100644
+--- a/Python/bltinmodule.c
++++ b/Python/bltinmodule.c
+@@ -2345,7 +2345,8 @@ builtin_input_impl(PyObject *module, PyObject *prompt)
+                 result = NULL;
+             }
+             else {
+-                len--;   /* strip trailing '\n' */
++                if (s[len-1] == '\n')
++                    len--;   /* strip trailing '\n' */
+                 if (len != 0 && s[len-1] == '\r')
+                     len--;   /* strip trailing '\r' */
+                 result = PyUnicode_Decode(s, len, stdin_encoding_str,
+diff --git a/configure b/configure
+index 901a26c9602..33f73c80231 100755
+--- a/configure
++++ b/configure
+@@ -9628,17 +9628,16 @@ then :
+       # Note: update CFLAGS because ac_compile/ac_link needs this too.
+       # without this, configure fails to find pthread_create, sem_init,
+       # etc because they are only available in the sysroot for
+-      # wasm32-wasi-threads.
++      # wasm32-wasip1-threads.
+       # Note: wasi-threads requires --import-memory.
+       # Note: wasi requires --export-memory.
+       # Note: --export-memory is implicit unless --import-memory is given
+       # Note: this requires LLVM >= 16.
+-      as_fn_append CFLAGS " -target wasm32-wasi-threads -pthread"
+-      as_fn_append CFLAGS_NODIST " -target wasm32-wasi-threads -pthread"
+-      as_fn_append LDFLAGS_NODIST " -target wasm32-wasi-threads -pthread"
++      as_fn_append CFLAGS " -target wasm32-wasip1-threads -pthread"
++      as_fn_append CFLAGS_NODIST " -target wasm32-wasip1-threads -pthread"
++      as_fn_append LDFLAGS_NODIST " -target wasm32-wasip1-threads -pthread"
+       as_fn_append LDFLAGS_NODIST " -Wl,--import-memory"
+       as_fn_append LDFLAGS_NODIST " -Wl,--export-memory"
+-      as_fn_append LDFLAGS_NODIST " -Wl,--max-memory=10485760"
+ 
+ fi
+ 
+diff --git a/configure.ac b/configure.ac
+index 597a44b331a..c4fe6cc8420 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -2464,17 +2464,16 @@ AS_CASE([$ac_sys_system],
+       # Note: update CFLAGS because ac_compile/ac_link needs this too.
+       # without this, configure fails to find pthread_create, sem_init,
+       # etc because they are only available in the sysroot for
+-      # wasm32-wasi-threads.
++      # wasm32-wasip1-threads.
+       # Note: wasi-threads requires --import-memory.
+       # Note: wasi requires --export-memory.
+       # Note: --export-memory is implicit unless --import-memory is given
+       # Note: this requires LLVM >= 16.
+-      AS_VAR_APPEND([CFLAGS], [" -target wasm32-wasi-threads -pthread"])
+-      AS_VAR_APPEND([CFLAGS_NODIST], [" -target wasm32-wasi-threads -pthread"])
+-      AS_VAR_APPEND([LDFLAGS_NODIST], [" -target wasm32-wasi-threads -pthread"])
++      AS_VAR_APPEND([CFLAGS], [" -target wasm32-wasip1-threads -pthread"])
++      AS_VAR_APPEND([CFLAGS_NODIST], [" -target wasm32-wasip1-threads -pthread"])
++      AS_VAR_APPEND([LDFLAGS_NODIST], [" -target wasm32-wasip1-threads -pthread"])
+       AS_VAR_APPEND([LDFLAGS_NODIST], [" -Wl,--import-memory"])
+       AS_VAR_APPEND([LDFLAGS_NODIST], [" -Wl,--export-memory"])
+-      AS_VAR_APPEND([LDFLAGS_NODIST], [" -Wl,--max-memory=10485760"])
+     ])
+ 
+     dnl gh-117645: Set the memory size to 20 MiB, the stack size to 8 MiB,

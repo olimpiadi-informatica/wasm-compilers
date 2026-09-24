@@ -156,10 +156,9 @@ build/llvm.BUILT: build/llvm.SRC build/libstdcxx.BUILT
 	ninja -C build/llvm-build install
 	touch "$@"
 
-build/python.BUILT: cpython build/wasi-libc.BUILT | build
+build/python.BUILT: cpython python.patch build/wasi-libc.BUILT | build
 	rsync -a --delete cpython/ build/cpython
-	sed -i s/-Wl,--max-memory=10485760// build/cpython/configure
-	sed -i s/wasm32-wasi-threads/wasm32-wasip1-threads/g build/cpython/Misc/platform_triplet.c build/cpython/configure.ac build/cpython/configure
+	cd build/cpython && patch -p1 < ../../python.patch
 	mkdir -p build/cpython/host-build
 	cd build/cpython/host-build && ../configure --prefix=${DIR}/build/cpython/install \
 		--disable-test-modules --with-pkg-config=no
