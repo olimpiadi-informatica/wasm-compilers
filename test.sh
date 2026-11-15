@@ -75,3 +75,75 @@ $(which wasmtime) -W threads=y -S threads=y --dir $DIR::/ \
 
 $(which wasmtime) -W threads=y -S threads=y --dir $DIR::/ \
   $DIR/main.wasm
+
+python3 - "$DIR" <<'EOF'
+import json, os, subprocess, sys
+
+root = sys.argv[1]
+os.makedirs(os.path.join(root, "workdir"), exist_ok=True)
+with open(os.path.join(root, "workdir/main.rs"), "w") as f:
+    f.write("fn main(){let x:i32=1+2;println!(\"{}\",x);}\n")
+with open(os.path.join(root, "workdir/rust-project.json"), "w") as f:
+    json.dump({
+        "sysroot": "/",
+        "sysroot_src": "/lib/rustlib/src/rust/library",
+        "crates": [{"root_module": "/workdir/main.rs", "edition": "2024", "deps": []}]
+    }, f)
+
+proc = subprocess.Popen(
+    ["wasmtime", "-W", "threads=y", "-S", "threads=y", "--dir", f"{root}::/", f"{root}/bin/rust-analyzer"],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE
+)
+
+def send(msg):
+    body = json.dumps(msg).encode()
+    proc.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+    proc.stdin.flush()
+
+def recv():
+    length = 0
+    while True:
+        line = proc.stdout.readline()
+        assert line, "EOF from rust-analyzer"
+        if line.startswith(b"Content-Length: "):
+            length = int(line[16:].strip())
+        elif line == b"\r\n":
+            return json.loads(proc.stdout.read(length))
+
+send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"processId": None, "rootUri": "file:///workdir", "capabilities": {}}})
+assert recv()["id"] == 1
+send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": "file:///workdir/main.rs", "languageId": "rust", "version": 1, "text": "fn main(){let v:Vec<i32>=Vec::new();v.}\n"}
+}})
+while True:
+    msg = recv()
+    if msg.get("method") == "textDocument/publishDiagnostics":
+        break
+send({"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": "file:///workdir/main.rs"},
+    "position": {"line": 0, "character": 38}
+}})
+while True:
+    msg = recv()
+    if msg.get("id") == 2:
+        items = msg["result"] if isinstance(msg["result"], list) else msg["result"]["items"]
+        assert any(it["label"].startswith("push") for it in items), f"Expected Vec::push completion, got {len(items)} items"
+        break
+send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+    "textDocument": {"uri": "file:///workdir/main.rs", "version": 2},
+    "contentChanges": [{"text": "fn main(){let x:i32=1+2;println!(\"{}\",x);}\n"}]
+}})
+send({"jsonrpc": "2.0", "id": 3, "method": "textDocument/formatting", "params": {
+    "textDocument": {"uri": "file:///workdir/main.rs"},
+    "options": {"tabSize": 4, "insertSpaces": True}
+}})
+while True:
+    msg = recv()
+    if msg.get("id") == 3:
+        assert msg.get("result"), f"Expected formatting edits, got {msg}"
+        break
+send({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": None})
+send({"jsonrpc": "2.0", "method": "exit", "params": None})
+assert proc.wait(timeout=10) == 0
+EOF

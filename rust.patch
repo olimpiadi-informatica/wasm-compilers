@@ -2928,3 +2928,1499 @@ index 00000000000..fdfcaa2ef4b
 +# Ask the native llvm-config, but replace the host prefix with your WASI prefix
 +OUTPUT=$($NATIVE_LLVM_CONFIG "$@")
 +echo "${OUTPUT//$NATIVE_PREFIX/$WASI_LLVM_PREFIX}"
+diff --git a/library/std/src/sys/pal/wasip1/os.rs b/library/std/src/sys/pal/wasip1/os.rs
+index 151ba25..1023956 100644
+--- a/library/std/src/sys/pal/wasip1/os.rs
++++ b/library/std/src/sys/pal/wasip1/os.rs
+@@ -1,7 +1,6 @@
+ #![forbid(unsafe_op_in_unsafe_fn)]
+ 
+ use crate::ffi::{CStr, OsStr, OsString};
+-use crate::marker::PhantomData;
+ use crate::os::wasi::prelude::*;
+ use crate::path::{self, PathBuf};
+ use crate::sys::common::small_c_string::run_path_with_cstr;
+@@ -74,40 +73,66 @@ pub fn chdir(p: &path::Path) -> io::Result<()> {
+     }
+ }
+ 
+-pub struct SplitPaths<'a>(!, PhantomData<&'a ()>);
++const PATH_SEPARATOR: u8 = b':';
+ 
+-pub fn split_paths(_unparsed: &OsStr) -> SplitPaths<'_> {
+-    panic!("unsupported")
++pub struct SplitPaths<'a> {
++    iter: crate::slice::Split<'a, u8, fn(&u8) -> bool>,
++}
++
++pub fn split_paths(unparsed: &OsStr) -> SplitPaths<'_> {
++    fn is_separator(&b: &u8) -> bool {
++        b == PATH_SEPARATOR
++    }
++
++    SplitPaths { iter: unparsed.as_bytes().split(is_separator as fn(&u8) -> bool) }
+ }
+ 
+ impl<'a> Iterator for SplitPaths<'a> {
+     type Item = PathBuf;
+     fn next(&mut self) -> Option<PathBuf> {
+-        self.0
++        self.iter.next().map(|part| PathBuf::from(OsStr::from_bytes(part)))
++    }
++    fn size_hint(&self) -> (usize, Option<usize>) {
++        self.iter.size_hint()
+     }
+ }
+ 
+ #[derive(Debug)]
+ pub struct JoinPathsError;
+ 
+-pub fn join_paths<I, T>(_paths: I) -> Result<OsString, JoinPathsError>
++pub fn join_paths<I, T>(paths: I) -> Result<OsString, JoinPathsError>
+ where
+     I: Iterator<Item = T>,
+     T: AsRef<OsStr>,
+ {
+-    Err(JoinPathsError)
++    let mut joined = Vec::new();
++
++    for (i, path) in paths.enumerate() {
++        let path = path.as_ref().as_bytes();
++        if i > 0 {
++            joined.push(PATH_SEPARATOR);
++        }
++        if path.contains(&PATH_SEPARATOR) {
++            return Err(JoinPathsError);
++        }
++        joined.extend_from_slice(path);
++    }
++    Ok(OsStringExt::from_vec(joined))
+ }
+ 
+ impl fmt::Display for JoinPathsError {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-        "not supported on wasm yet".fmt(f)
++        write!(f, "path segment contains separator `{}`", char::from(PATH_SEPARATOR))
+     }
+ }
+ 
+ impl crate::error::Error for JoinPathsError {}
+ 
+ pub fn current_exe() -> io::Result<PathBuf> {
+-    unsupported()
++    match crate::env::args_os().next() {
++        Some(p) => Ok(PathBuf::from(p)),
++        None => unsupported(),
++    }
+ }
+ 
+ #[allow(dead_code)]
+@@ -116,11 +141,15 @@ pub fn page_size() -> usize {
+ }
+ 
+ pub fn temp_dir() -> PathBuf {
+-    panic!("no filesystem on wasm")
++    crate::env::var_os("TMPDIR")
++        .or_else(|| crate::env::var_os("TEMP"))
++        .or_else(|| crate::env::var_os("TMP"))
++        .map(PathBuf::from)
++        .unwrap_or_else(|| PathBuf::from("/tmp"))
+ }
+ 
+ pub fn home_dir() -> Option<PathBuf> {
+-    None
++    crate::env::var_os("HOME").map(PathBuf::from)
+ }
+ 
+ pub fn exit(code: i32) -> ! {
+@@ -128,7 +157,7 @@ pub fn exit(code: i32) -> ! {
+ }
+ 
+ pub fn getpid() -> u32 {
+-    panic!("unsupported");
++    1
+ }
+ 
+ #[doc(hidden)]
+diff --git a/src/bootstrap/src/core/build_steps/tool.rs b/src/bootstrap/src/core/build_steps/tool.rs
+index dcc4898..021a6ed 100644
+--- a/src/bootstrap/src/core/build_steps/tool.rs
++++ b/src/bootstrap/src/core/build_steps/tool.rs
+@@ -1030,7 +1030,7 @@ pub fn from_compilers(compilers: RustcPrivateCompilers) -> Self {
+ }
+ 
+ impl RustAnalyzer {
+-    pub const ALLOW_FEATURES: &'static str = "rustc_private,proc_macro_internals,proc_macro_diagnostic,proc_macro_span,proc_macro_span_shrink,proc_macro_def_site";
++    pub const ALLOW_FEATURES: &'static str = "rustc_private,proc_macro_internals,proc_macro_diagnostic,proc_macro_span,proc_macro_span_shrink,proc_macro_def_site,stdarch_wasm_atomic_wait";
+ }
+ 
+ impl Step for RustAnalyzer {
+@@ -1052,18 +1052,44 @@ fn make_run(run: RunConfig<'_>) {
+     fn run(self, builder: &Builder<'_>) -> ToolBuildResult {
+         let build_compiler = self.compilers.build_compiler;
+         let target = self.compilers.target();
+-        builder.ensure(ToolBuild {
++        if target.contains("wasm") {
++            let rustc_deps_dir = builder.cargo_out(build_compiler, Mode::Rustc, target).join("deps");
++            let sysroot_libdir = builder.sysroot_target_libdir(build_compiler, target);
++            if let Ok(entries) = fs::read_dir(&rustc_deps_dir) {
++                for entry in entries.flatten() {
++                    let path = entry.path();
++                    if path.extension().and_then(|s| s.to_str()) == Some("rlib") {
++                        builder.copy_link(
++                            &path,
++                            &sysroot_libdir.join(path.file_name().unwrap()),
++                            FileType::Regular,
++                        );
++                    }
++                }
++            }
++        }
++        let tool_result = builder.ensure(ToolBuild {
+             build_compiler,
+             target,
+             tool: "rust-analyzer",
+-            mode: Mode::ToolRustcPrivate,
++            mode: if target.contains("wasm") { Mode::ToolStd } else { Mode::ToolRustcPrivate },
+             path: "src/tools/rust-analyzer",
+-            extra_features: vec!["in-rust-tree".to_owned()],
++            extra_features: if target.contains("wasm") { Vec::new() } else { vec!["in-rust-tree".to_owned()] },
+             source_type: SourceType::InTree,
+             allow_features: RustAnalyzer::ALLOW_FEATURES,
+             cargo_args: Vec::new(),
+             artifact_kind: ToolArtifactKind::Binary,
+-        })
++        });
++        if target.contains("wasm") {
++            let bin_dir = builder.sysroot(self.compilers.target_compiler).join("bin");
++            t!(fs::create_dir_all(&bin_dir));
++            builder.copy_link(
++                &tool_result.tool_path,
++                &bin_dir.join(exe("rust-analyzer", target)),
++                FileType::Executable,
++            );
++        }
++        tool_result
+     }
+ 
+     fn metadata(&self) -> Option<StepMetadata> {
+@@ -1094,12 +1120,8 @@ impl Step for RustAnalyzerProcMacroSrv {
+     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
+         let builder = run.builder;
+         // Allow building `rust-analyzer-proc-macro-srv` both as part of the `rust-analyzer` and as a stand-alone tool.
+-        run.path("src/tools/rust-analyzer")
+-            .path("src/tools/rust-analyzer/crates/proc-macro-srv-cli")
+-            .default_condition(
+-                builder.tool_enabled("rust-analyzer")
+-                    || builder.tool_enabled("rust-analyzer-proc-macro-srv"),
+-            )
++        run.path("src/tools/rust-analyzer/crates/proc-macro-srv-cli")
++            .default_condition(builder.tool_enabled("rust-analyzer-proc-macro-srv"))
+     }
+ 
+     fn make_run(run: RunConfig<'_>) {
+diff --git a/src/bootstrap/src/core/builder/cargo.rs b/src/bootstrap/src/core/builder/cargo.rs
+index b7d2b72..c8befe5 100644
+--- a/src/bootstrap/src/core/builder/cargo.rs
++++ b/src/bootstrap/src/core/builder/cargo.rs
+@@ -824,7 +824,7 @@ fn cargo(
+             // rustc step and one that we just built. This isn't always a
+             // problem, somehow -- not really clear why -- but we know that this
+             // fixes things.
+-            Mode::ToolRustcPrivate => metadata.push_str("tool-rustc"),
++            Mode::ToolRustcPrivate | Mode::ToolStd => metadata.push_str("tool-rustc"),
+             // Same for codegen backends.
+             Mode::Codegen => metadata.push_str("codegen"),
+             _ => {}
+diff --git a/src/tools/rust-analyzer/Cargo.lock b/src/tools/rust-analyzer/Cargo.lock
+index 5a29379..e9e1f52 100644
+--- a/src/tools/rust-analyzer/Cargo.lock
++++ b/src/tools/rust-analyzer/Cargo.lock
+@@ -17,18 +17,81 @@ version = "2.0.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+ 
++[[package]]
++name = "aho-corasick"
++version = "1.1.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
++dependencies = [
++ "memchr",
++]
++
+ [[package]]
+ name = "allocator-api2"
+ version = "0.2.21"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+ 
++[[package]]
++name = "annotate-snippets"
++version = "0.9.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ccaf7e9dfbb6ab22c82e473cd1a8a7bd313c19a5b7e40970f3d89ef5a5c9e81e"
++dependencies = [
++ "unicode-width 0.1.14",
++ "yansi-term",
++]
++
++[[package]]
++name = "anstream"
++version = "0.6.21"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "43d5b281e737544384e969a5ccad3f1cdd24b48086a0fc1b2a5262a26b8f4f4a"
++dependencies = [
++ "anstyle",
++ "anstyle-parse",
++ "anstyle-query",
++ "anstyle-wincon",
++ "colorchoice",
++ "is_terminal_polyfill",
++ "utf8parse",
++]
++
+ [[package]]
+ name = "anstyle"
+ version = "1.0.11"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "862ed96ca487e809f1c8e5a8447f6ee2cf102f846893800b20cebdf541fc6bbd"
+ 
++[[package]]
++name = "anstyle-parse"
++version = "0.2.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4e7644824f0aa2c7b9384579234ef10eb7efb6a0deb83f9630a49594dd9c15c2"
++dependencies = [
++ "utf8parse",
++]
++
++[[package]]
++name = "anstyle-query"
++version = "1.1.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
++dependencies = [
++ "windows-sys 0.60.2",
++]
++
++[[package]]
++name = "anstyle-wincon"
++version = "3.0.11"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
++dependencies = [
++ "anstyle",
++ "once_cell_polyfill",
++ "windows-sys 0.60.2",
++]
++
+ [[package]]
+ name = "anyhow"
+ version = "1.0.98"
+@@ -134,6 +197,22 @@ version = "0.2.13"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "26c4925bc979b677330a8c7fe7a8c94af2dbb4a2d37b4a20a80d884400f46baa"
+ 
++[[package]]
++name = "bstr"
++version = "1.12.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "63044e1ae8e69f3b5a92c736ca6269b8d12fa7efe39bf34ddb06d102cf0e2cab"
++dependencies = [
++ "memchr",
++ "serde",
++]
++
++[[package]]
++name = "bytecount"
++version = "0.6.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "175812e0be2bccb6abe50bb8d566126198344f707e304f45c648fd8f2cc0365e"
++
+ [[package]]
+ name = "byteorder"
+ version = "1.5.0"
+@@ -149,6 +228,15 @@ dependencies = [
+  "serde",
+ ]
+ 
++[[package]]
++name = "cargo-platform"
++version = "0.1.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e35af189006b9c0f00a064685c727031e3ed2d8020f7ba284d78cc2671bd36ea"
++dependencies = [
++ "serde",
++]
++
+ [[package]]
+ name = "cargo-platform"
+ version = "0.2.0"
+@@ -169,7 +257,7 @@ dependencies = [
+  "serde-untagged",
+  "serde-value",
+  "thiserror 1.0.69",
+- "toml",
++ "toml 0.8.23",
+  "unicode-xid",
+  "url",
+ ]
+@@ -185,11 +273,25 @@ dependencies = [
+  "serde-untagged",
+  "serde-value",
+  "thiserror 2.0.12",
+- "toml",
++ "toml 0.8.23",
+  "unicode-xid",
+  "url",
+ ]
+ 
++[[package]]
++name = "cargo_metadata"
++version = "0.18.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2d886547e41f740c616ae73108f6eb70afe6d940c7bc697cb30f13daec073037"
++dependencies = [
++ "camino",
++ "cargo-platform 0.1.9",
++ "semver",
++ "serde",
++ "serde_json",
++ "thiserror 1.0.69",
++]
++
+ [[package]]
+ name = "cargo_metadata"
+ version = "0.20.0"
+@@ -197,7 +299,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "4f7835cfc6135093070e95eb2b53e5d9b5c403dc3a6be6040ee026270aa82502"
+ dependencies = [
+  "camino",
+- "cargo-platform",
++ "cargo-platform 0.2.0",
+  "cargo-util-schemas 0.2.0",
+  "semver",
+  "serde",
+@@ -212,7 +314,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "5cfca2aaa699835ba88faf58a06342a314a950d2b9686165e038286c30316868"
+ dependencies = [
+  "camino",
+- "cargo-platform",
++ "cargo-platform 0.2.0",
+  "cargo-util-schemas 0.8.2",
+  "semver",
+  "serde",
+@@ -315,6 +417,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ed87a9d530bb41a67537289bafcac159cb3ee28460e0a4571123d2a778a6a882"
+ dependencies = [
+  "clap_builder",
++ "clap_derive",
++]
++
++[[package]]
++name = "clap-cargo"
++version = "0.12.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "383f21342a464d4af96e9a4cad22a0b4f2880d4a5b3bbf5c9654dd1d9a224ee4"
++dependencies = [
++ "anstyle",
++ "clap",
+ ]
+ 
+ [[package]]
+@@ -323,8 +436,22 @@ version = "4.5.42"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "64f4f3f3c77c94aff3c7e9aac9a2ca1974a5adf392a8bb751e827d6d127ab966"
+ dependencies = [
++ "anstream",
+  "anstyle",
+  "clap_lex",
++ "strsim",
++]
++
++[[package]]
++name = "clap_derive"
++version = "4.5.41"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ef4f52386a59ca4c860f7393bcf8abd8dfd91ecccc0f774635ff68e92eeef491"
++dependencies = [
++ "heck",
++ "proc-macro2",
++ "quote",
++ "syn",
+ ]
+ 
+ [[package]]
+@@ -342,6 +469,12 @@ dependencies = [
+  "thiserror 2.0.12",
+ ]
+ 
++[[package]]
++name = "colorchoice"
++version = "1.0.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
++
+ [[package]]
+ name = "countme"
+ version = "3.0.1"
+@@ -456,6 +589,12 @@ dependencies = [
+  "syn",
+ ]
+ 
++[[package]]
++name = "diff"
++version = "0.1.13"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8"
++
+ [[package]]
+ name = "dirs"
+ version = "6.0.0"
+@@ -465,6 +604,16 @@ dependencies = [
+  "dirs-sys",
+ ]
+ 
++[[package]]
++name = "dirs-next"
++version = "2.0.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b98cf8ebf19c3d1b223e151f99a4f9f0690dca41414773390fc824184ac833e1"
++dependencies = [
++ "cfg-if",
++ "dirs-sys-next",
++]
++
+ [[package]]
+ name = "dirs-sys"
+ version = "0.5.0"
+@@ -473,10 +622,21 @@ checksum = "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab"
+ dependencies = [
+  "libc",
+  "option-ext",
+- "redox_users",
++ "redox_users 0.5.0",
+  "windows-sys 0.60.2",
+ ]
+ 
++[[package]]
++name = "dirs-sys-next"
++version = "0.1.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4ebda144c4fe02d1f7ea1a7d9641b6fc6b580adcfa024ae48797ecdeb6825b4d"
++dependencies = [
++ "libc",
++ "redox_users 0.4.6",
++ "winapi",
++]
++
+ [[package]]
+ name = "displaydoc"
+ version = "0.2.5"
+@@ -609,6 +769,15 @@ version = "0.4.7"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "7ab85b9b05e3978cc9a9cf8fea7f01b494e1a09ed3037e16ba39edc7a29eb61a"
+ 
++[[package]]
++name = "getopts"
++version = "0.2.24"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cfe4fbac503b8d1f88e6676011885f34b7174f46e59956bba534ba83abded4df"
++dependencies = [
++ "unicode-width 0.2.3",
++]
++
+ [[package]]
+ name = "getrandom"
+ version = "0.2.16"
+@@ -626,6 +795,19 @@ version = "0.31.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "07e28edb80900c19c28f1072f2e8aeca7fa06b23cd4169cefe1af5aa3260783f"
+ 
++[[package]]
++name = "globset"
++version = "0.4.21"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f98b0d85522dc0a824cfebbc9594ff4a9b289c568bea0370319dfbdf20ccdd2d"
++dependencies = [
++ "aho-corasick",
++ "bstr",
++ "log",
++ "regex-automata 0.4.18",
++ "regex-syntax 0.8.11",
++]
++
+ [[package]]
+ name = "hash32"
+ version = "0.2.1"
+@@ -675,6 +857,12 @@ dependencies = [
+  "stable_deref_trait",
+ ]
+ 
++[[package]]
++name = "heck"
++version = "0.5.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
++
+ [[package]]
+ name = "hermit-abi"
+ version = "0.5.2"
+@@ -821,15 +1009,6 @@ dependencies = [
+  "typed-arena",
+ ]
+ 
+-[[package]]
+-name = "home"
+-version = "0.5.11"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "589533453244b0995c858700322199b2becb13b627df2851f64a2775d024abcf"
+-dependencies = [
+- "windows-sys 0.59.0",
+-]
+-
+ [[package]]
+ name = "icu_collections"
+ version = "2.0.0"
+@@ -1079,6 +1258,22 @@ dependencies = [
+  "icu_properties",
+ ]
+ 
++[[package]]
++name = "ignore"
++version = "0.4.34"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "484be5657551d7868d67587df967fb4fcbe9d266a761cc855aaa148fda0b3cc7"
++dependencies = [
++ "crossbeam-deque",
++ "globset",
++ "log",
++ "memchr",
++ "regex-automata 0.4.18",
++ "same-file",
++ "walkdir",
++ "winapi-util",
++]
++
+ [[package]]
+ name = "indexmap"
+ version = "2.9.0"
+@@ -1129,6 +1324,12 @@ dependencies = [
+  "memoffset",
+ ]
+ 
++[[package]]
++name = "is_terminal_polyfill"
++version = "1.70.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
++
+ [[package]]
+ name = "itertools"
+ version = "0.12.1"
+@@ -1334,6 +1535,15 @@ dependencies = [
+  "url",
+ ]
+ 
++[[package]]
++name = "matchers"
++version = "0.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8263075bb86c5a1b1427b5ae862e8889656f126e9f77c484496e8b47cf5c5558"
++dependencies = [
++ "regex-automata 0.1.10",
++]
++
+ [[package]]
+ name = "mbe"
+ version = "0.0.0"
+@@ -1460,6 +1670,16 @@ version = "2.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "5e0826a989adedc2a244799e823aece04662b66609d96af8dff7ac6df9a8925d"
+ 
++[[package]]
++name = "nu-ansi-term"
++version = "0.46.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "77a8165726e8236064dbb45459242600304b42a5ea24ee2948e18e023bf7ba84"
++dependencies = [
++ "overload",
++ "winapi",
++]
++
+ [[package]]
+ name = "nu-ansi-term"
+ version = "0.50.1"
+@@ -1518,6 +1738,12 @@ version = "1.21.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
+ 
++[[package]]
++name = "once_cell_polyfill"
++version = "1.70.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
++
+ [[package]]
+ name = "oorandom"
+ version = "11.1.5"
+@@ -1539,6 +1765,12 @@ dependencies = [
+  "num-traits",
+ ]
+ 
++[[package]]
++name = "overload"
++version = "0.1.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b15813163c1d831bf4a13c3610c05c0d03b39feb07f7e09fa234dac9b15aaf39"
++
+ [[package]]
+ name = "papaya"
+ version = "0.2.3"
+@@ -1960,6 +2192,17 @@ dependencies = [
+  "bitflags 2.9.1",
+ ]
+ 
++[[package]]
++name = "redox_users"
++version = "0.4.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
++dependencies = [
++ "getrandom",
++ "libredox",
++ "thiserror 1.0.69",
++]
++
+ [[package]]
+ name = "redox_users"
+ version = "0.5.0"
+@@ -1971,6 +2214,50 @@ dependencies = [
+  "thiserror 2.0.12",
+ ]
+ 
++[[package]]
++name = "regex"
++version = "1.13.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
++dependencies = [
++ "aho-corasick",
++ "memchr",
++ "regex-automata 0.4.18",
++ "regex-syntax 0.8.11",
++]
++
++[[package]]
++name = "regex-automata"
++version = "0.1.10"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6c230d73fb8d8c1b9c0b3135c5142a8acee3a0558fb8db5cf1cb65f8d7862132"
++dependencies = [
++ "regex-syntax 0.6.29",
++]
++
++[[package]]
++name = "regex-automata"
++version = "0.4.18"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
++dependencies = [
++ "aho-corasick",
++ "memchr",
++ "regex-syntax 0.8.11",
++]
++
++[[package]]
++name = "regex-syntax"
++version = "0.6.29"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f162c6dd7b008981e4d40210aca20b4bd0f9b60ca9271061b07f78537722f2e1"
++
++[[package]]
++name = "regex-syntax"
++version = "0.8.11"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
++
+ [[package]]
+ name = "rowan"
+ version = "0.15.15"
+@@ -2023,6 +2310,7 @@ dependencies = [
+  "project-model",
+  "rayon",
+  "rustc-hash 2.1.1",
++ "rustfmt-nightly",
+  "scip",
+  "semver",
+  "serde",
+@@ -2035,7 +2323,7 @@ dependencies = [
+  "test-fixture",
+  "test-utils",
+  "tikv-jemallocator",
+- "toml",
++ "toml 0.8.23",
+  "toolchain",
+  "tracing",
+  "tracing-subscriber",
+@@ -2098,6 +2386,50 @@ dependencies = [
+  "semver",
+ ]
+ 
++[[package]]
++name = "rustfmt-config_proc_macro"
++version = "0.3.0"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn",
++]
++
++[[package]]
++name = "rustfmt-nightly"
++version = "1.8.0"
++dependencies = [
++ "annotate-snippets",
++ "anyhow",
++ "bytecount",
++ "cargo_metadata 0.18.1",
++ "clap",
++ "clap-cargo",
++ "diff",
++ "dirs",
++ "getopts",
++ "ignore",
++ "itertools 0.12.1",
++ "regex",
++ "rustfmt-config_proc_macro",
++ "serde",
++ "serde_json",
++ "term",
++ "thiserror 1.0.69",
++ "toml 0.7.8",
++ "tracing",
++ "tracing-subscriber",
++ "unicode-properties",
++ "unicode-segmentation",
++ "unicode-width 0.1.14",
++]
++
++[[package]]
++name = "rustversion"
++version = "1.0.23"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
++
+ [[package]]
+ name = "ryu"
+ version = "1.0.20"
+@@ -2345,6 +2677,12 @@ dependencies = [
+  "windows-sys 0.60.2",
+ ]
+ 
++[[package]]
++name = "strsim"
++version = "0.11.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
++
+ [[package]]
+ name = "syn"
+ version = "2.0.103"
+@@ -2413,6 +2751,17 @@ version = "1.1.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "e5c4bcc0a4fa333239f43662d15fbf995f384b2aeaf89c4ab4c83353d6cbb952"
+ 
++[[package]]
++name = "term"
++version = "0.7.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c59df8ac95d96ff9bede18eb7300b0fda5e5d8d90960e76f8e14ae765eedbf1f"
++dependencies = [
++ "dirs-next",
++ "rustversion",
++ "winapi",
++]
++
+ [[package]]
+ name = "test-fixture"
+ version = "0.0.0"
+@@ -2577,6 +2926,18 @@ dependencies = [
+  "zerovec",
+ ]
+ 
++[[package]]
++name = "toml"
++version = "0.7.8"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "dd79e69d3b627db300ff956027cc6c3798cef26d22526befdfcd12feeb6d2257"
++dependencies = [
++ "serde",
++ "serde_spanned",
++ "toml_datetime",
++ "toml_edit 0.19.15",
++]
++
+ [[package]]
+ name = "toml"
+ version = "0.8.23"
+@@ -2586,7 +2947,7 @@ dependencies = [
+  "serde",
+  "serde_spanned",
+  "toml_datetime",
+- "toml_edit",
++ "toml_edit 0.22.27",
+ ]
+ 
+ [[package]]
+@@ -2598,6 +2959,19 @@ dependencies = [
+  "serde",
+ ]
+ 
++[[package]]
++name = "toml_edit"
++version = "0.19.15"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1b5bb770da30e5cbfde35a2d7b9b8a2c4b8ef89548a7a6aeab5c9a576e3e7421"
++dependencies = [
++ "indexmap",
++ "serde",
++ "serde_spanned",
++ "toml_datetime",
++ "winnow 0.5.40",
++]
++
+ [[package]]
+ name = "toml_edit"
+ version = "0.22.27"
+@@ -2609,7 +2983,7 @@ dependencies = [
+  "serde_spanned",
+  "toml_datetime",
+  "toml_write",
+- "winnow",
++ "winnow 0.7.11",
+ ]
+ 
+ [[package]]
+@@ -2623,7 +2997,6 @@ name = "toolchain"
+ version = "0.0.0"
+ dependencies = [
+  "camino",
+- "home",
+ ]
+ 
+ [[package]]
+@@ -2675,9 +3048,15 @@ version = "0.3.19"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "e8189decb5ac0fa7bc8b96b7cb9b2701d60d48805aca84a238004d665fcc4008"
+ dependencies = [
++ "matchers",
++ "nu-ansi-term 0.46.0",
++ "once_cell",
++ "regex",
+  "sharded-slab",
++ "smallvec",
+  "thread_local",
+  "time",
++ "tracing",
+  "tracing-core",
+  "tracing-log",
+ ]
+@@ -2688,7 +3067,7 @@ version = "0.4.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "f459ca79f1b0d5f71c54ddfde6debfc59c8b6eeb46808ae492077f739dc7b49c"
+ dependencies = [
+- "nu-ansi-term",
++ "nu-ansi-term 0.50.1",
+  "tracing-core",
+  "tracing-log",
+  "tracing-subscriber",
+@@ -2747,6 +3126,24 @@ version = "0.1.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "e70f2a8b45122e719eb623c01822704c4e0907e7e426a05927e1a1cfff5b75d0"
+ 
++[[package]]
++name = "unicode-segmentation"
++version = "1.13.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
++
++[[package]]
++name = "unicode-width"
++version = "0.1.14"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
++
++[[package]]
++name = "unicode-width"
++version = "0.2.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
++
+ [[package]]
+ name = "unicode-xid"
+ version = "0.2.6"
+@@ -2771,6 +3168,12 @@ version = "1.0.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
+ 
++[[package]]
++name = "utf8parse"
++version = "0.2.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
++
+ [[package]]
+ name = "valuable"
+ version = "0.1.1"
+@@ -2822,6 +3225,22 @@ version = "0.11.1+wasi-snapshot-preview1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
+ 
++[[package]]
++name = "winapi"
++version = "0.3.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419"
++dependencies = [
++ "winapi-i686-pc-windows-gnu",
++ "winapi-x86_64-pc-windows-gnu",
++]
++
++[[package]]
++name = "winapi-i686-pc-windows-gnu"
++version = "0.4.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
++
+ [[package]]
+ name = "winapi-util"
+ version = "0.1.9"
+@@ -2831,6 +3250,12 @@ dependencies = [
+  "windows-sys 0.59.0",
+ ]
+ 
++[[package]]
++name = "winapi-x86_64-pc-windows-gnu"
++version = "0.4.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
++
+ [[package]]
+ name = "windows"
+ version = "0.61.3"
+@@ -3163,6 +3588,15 @@ version = "0.53.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "271414315aff87387382ec3d271b52d7ae78726f5d44ac98b4f4030c91880486"
+ 
++[[package]]
++name = "winnow"
++version = "0.5.40"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f593a95398737aeed53e489c785df13f3618e41dbcd6718c6addbf1395aa6876"
++dependencies = [
++ "memchr",
++]
++
+ [[package]]
+ name = "winnow"
+ version = "0.7.11"
+@@ -3234,6 +3668,15 @@ dependencies = [
+  "zip",
+ ]
+ 
++[[package]]
++name = "yansi-term"
++version = "0.1.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "fe5c30ade05e61656247b2e334a031dfd0cc466fadef865bdcdea8d537951bf1"
++dependencies = [
++ "winapi",
++]
++
+ [[package]]
+ name = "yoke"
+ version = "0.8.0"
+diff --git a/src/tools/rust-analyzer/crates/ide-db/src/lib.rs b/src/tools/rust-analyzer/crates/ide-db/src/lib.rs
+index 49f7f63..946d909 100644
+--- a/src/tools/rust-analyzer/crates/ide-db/src/lib.rs
++++ b/src/tools/rust-analyzer/crates/ide-db/src/lib.rs
+@@ -76,7 +76,13 @@ pub mod syntax_helpers {
+ pub type FilePosition = FilePositionWrapper<FileId>;
+ pub type FileRange = FileRangeWrapper<FileId>;
+ 
+-#[salsa_macros::db]
++#[cfg(target_arch = "wasm32")]
++struct ReaderCount {
++    clones: std::sync::Mutex<usize>,
++    cvar: std::sync::Condvar,
++}
++
++#[cfg_attr(not(target_arch = "wasm32"), salsa_macros::db)]
+ pub struct RootDatabase {
+     // FIXME: Revisit this commit now that we migrated to the new salsa, given we store arcs in this
+     // db directly now
+@@ -87,6 +93,26 @@ pub struct RootDatabase {
+     storage: ManuallyDrop<salsa::Storage<Self>>,
+     files: Arc<Files>,
+     crates_map: Arc<CratesMap>,
++    #[cfg(target_arch = "wasm32")]
++    readers: Arc<ReaderCount>,
++}
++
++#[cfg(target_arch = "wasm32")]
++unsafe impl salsa::plumbing::HasStorage for RootDatabase {
++    #[inline(always)]
++    fn storage(&self) -> &salsa::plumbing::Storage<Self> {
++        &self.storage
++    }
++
++    #[inline(always)]
++    fn storage_mut(&mut self) -> &mut salsa::plumbing::Storage<Self> {
++        let mut clones = self.readers.clones.lock().unwrap();
++        while *clones != 1 {
++            clones = self.readers.cvar.wait(clones).unwrap();
++        }
++        drop(clones);
++        &mut self.storage
++    }
+ }
+ 
+ impl std::panic::RefUnwindSafe for RootDatabase {}
+@@ -97,15 +123,29 @@ impl salsa::Database for RootDatabase {}
+ impl Drop for RootDatabase {
+     fn drop(&mut self) {
+         unsafe { ManuallyDrop::drop(&mut self.storage) };
++        #[cfg(target_arch = "wasm32")]
++        {
++            let mut clones = self.readers.clones.lock().unwrap();
++            *clones -= 1;
++            if *clones == 1 {
++                self.readers.cvar.notify_all();
++            }
++        }
+     }
+ }
+ 
+ impl Clone for RootDatabase {
+     fn clone(&self) -> Self {
++        #[cfg(target_arch = "wasm32")]
++        {
++            *self.readers.clones.lock().unwrap() += 1;
++        }
+         Self {
+             storage: self.storage.clone(),
+             files: self.files.clone(),
+             crates_map: self.crates_map.clone(),
++            #[cfg(target_arch = "wasm32")]
++            readers: self.readers.clone(),
+         }
+     }
+ }
+@@ -183,6 +223,11 @@ pub fn new(lru_capacity: Option<u16>) -> RootDatabase {
+             storage: ManuallyDrop::new(salsa::Storage::default()),
+             files: Default::default(),
+             crates_map: Default::default(),
++            #[cfg(target_arch = "wasm32")]
++            readers: Arc::new(ReaderCount {
++                clones: std::sync::Mutex::new(1),
++                cvar: std::sync::Condvar::new(),
++            }),
+         };
+         // This needs to be here otherwise `CrateGraphBuilder` will panic.
+         db.set_all_crates(Arc::new(Box::new([])));
+diff --git a/src/tools/rust-analyzer/crates/project-model/src/sysroot.rs b/src/tools/rust-analyzer/crates/project-model/src/sysroot.rs
+index c0a5009..9fb5dc3 100644
+--- a/src/tools/rust-analyzer/crates/project-model/src/sysroot.rs
++++ b/src/tools/rust-analyzer/crates/project-model/src/sysroot.rs
+@@ -129,6 +129,15 @@ pub fn discover_rustc_src(&self) -> Option<ManifestPath> {
+     }
+ 
+     pub fn new(sysroot_dir: Option<AbsPathBuf>, rust_lib_src_dir: Option<AbsPathBuf>) -> Sysroot {
++        #[cfg(target_arch = "wasm32")]
++        let (sysroot_dir, rust_lib_src_dir) = {
++            let sysroot_dir = sysroot_dir.or_else(|| Some(AbsPathBuf::assert("/".into())));
++            let rust_lib_src_dir = rust_lib_src_dir.or_else(|| {
++                let default_src = AbsPathBuf::assert("/lib/rustlib/src/rust/library".into());
++                fs::metadata(&default_src).ok().map(|_| default_src)
++            });
++            (sysroot_dir, rust_lib_src_dir)
++        };
+         Self::assemble(sysroot_dir.map(Ok), rust_lib_src_dir.map(Ok))
+     }
+ 
+@@ -164,17 +173,22 @@ pub fn tool(
+     }
+ 
+     pub fn discover_proc_macro_srv(&self) -> Option<anyhow::Result<AbsPathBuf>> {
+-        let root = self.root()?;
+-        Some(
+-            ["libexec", "lib"]
+-                .into_iter()
+-                .map(|segment| root.join(segment).join("rust-analyzer-proc-macro-srv"))
+-                .find_map(|server_path| probe_for_binary(server_path.into()))
+-                .map(AbsPathBuf::assert)
+-                .ok_or_else(|| {
+-                    anyhow::format_err!("cannot find proc-macro server in sysroot `{}`", root)
+-                }),
+-        )
++        #[cfg(target_arch = "wasm32")]
++        return None;
++        #[cfg(not(target_arch = "wasm32"))]
++        {
++            let root = self.root()?;
++            Some(
++                ["libexec", "lib"]
++                    .into_iter()
++                    .map(|segment| root.join(segment).join("rust-analyzer-proc-macro-srv"))
++                    .find_map(|server_path| probe_for_binary(server_path.into()))
++                    .map(AbsPathBuf::assert)
++                    .ok_or_else(|| {
++                        anyhow::format_err!("cannot find proc-macro server in sysroot `{}`", root)
++                    }),
++            )
++        }
+     }
+ 
+     fn assemble(
+@@ -206,6 +220,7 @@ fn assemble(
+         }
+     }
+ 
++    #[allow(unused_variables)]
+     pub fn load_workspace(
+         &self,
+         sysroot_source_config: &RustSourceWorkspaceConfig,
+@@ -221,6 +236,7 @@ pub fn load_workspace(
+         };
+         if let RustSourceWorkspaceConfig::CargoMetadata(cargo_config) = sysroot_source_config {
+             let library_manifest = ManifestPath::try_from(src_root.join("Cargo.toml")).unwrap();
++            #[cfg(not(target_arch = "wasm32"))]
+             if fs::metadata(&library_manifest).is_ok() {
+                 match self.load_library_via_cargo(
+                     &library_manifest,
+@@ -236,6 +252,8 @@ pub fn load_workspace(
+                     }
+                 }
+             }
++            #[cfg(target_arch = "wasm32")]
++            let _ = (cargo_config, library_manifest);
+             tracing::debug!("Stitching sysroot library: {src_root}");
+ 
+             let mut stitched = stitched::Stitched { crates: Default::default() };
+@@ -314,6 +332,7 @@ pub fn set_workspace(&mut self, workspace: RustLibSrcWorkspace) {
+         }
+     }
+ 
++    #[allow(dead_code)]
+     fn load_library_via_cargo(
+         &self,
+         library_manifest: &ManifestPath,
+@@ -396,6 +415,9 @@ fn discover_sysroot_dir(
+     current_dir: &AbsPath,
+     extra_env: &FxHashMap<String, Option<String>>,
+ ) -> Result<AbsPathBuf> {
++    if cfg!(target_arch = "wasm32") {
++        return Ok(AbsPathBuf::assert(Utf8PathBuf::from("/")));
++    }
+     let mut rustc = toolchain::command(Tool::Rustc.path(), current_dir, extra_env);
+     rustc.current_dir(current_dir).args(["--print", "sysroot"]);
+     tracing::debug!("Discovering sysroot by {:?}", rustc);
+diff --git a/src/tools/rust-analyzer/crates/rust-analyzer/Cargo.toml b/src/tools/rust-analyzer/crates/rust-analyzer/Cargo.toml
+index b301a71..9308c5d 100644
+--- a/src/tools/rust-analyzer/crates/rust-analyzer/Cargo.toml
++++ b/src/tools/rust-analyzer/crates/rust-analyzer/Cargo.toml
+@@ -75,6 +75,10 @@ vfs-notify.workspace = true
+ vfs.workspace = true
+ paths.workspace = true
+ 
++[target.'cfg(target_arch = "wasm32")'.dependencies]
++rustfmt-nightly = { path = "../../../rustfmt", default-features = false }
++parking_lot = { version = "0.12.4", features = ["nightly"] }
++
+ [target.'cfg(windows)'.dependencies]
+ windows-sys = { version = "0.60", features = [
+   "Win32_System_Diagnostics_Debug",
+diff --git a/src/tools/rust-analyzer/crates/rust-analyzer/src/config.rs b/src/tools/rust-analyzer/crates/rust-analyzer/src/config.rs
+index 1a00295..e994313 100644
+--- a/src/tools/rust-analyzer/crates/rust-analyzer/src/config.rs
++++ b/src/tools/rust-analyzer/crates/rust-analyzer/src/config.rs
+@@ -360,10 +360,10 @@ pub enum MaxSubstitutionLength {
+         numThreads: Option<NumThreads> = None,
+ 
+         /// Expand attribute macros. Requires `#rust-analyzer.procMacro.enable#` to be set.
+-        procMacro_attributes_enable: bool = true,
++        procMacro_attributes_enable: bool = !cfg!(target_arch = "wasm32"),
+ 
+         /// Enable support for procedural macros, implies `#rust-analyzer.cargo.buildScripts.enable#`.
+-        procMacro_enable: bool = true,
++        procMacro_enable: bool = !cfg!(target_arch = "wasm32"),
+ 
+         /// Internal config, path to proc-macro server executable.
+         procMacro_server: Option<Utf8PathBuf> = None,
+@@ -640,14 +640,14 @@ pub enum MaxSubstitutionLength {
+ 
+         /// Show experimental rust-analyzer diagnostics that might have more false positives than
+         /// usual.
+-        diagnostics_experimental_enable: bool = false,
++        diagnostics_experimental_enable: bool = cfg!(target_arch = "wasm32"),
+ 
+         /// Map of prefixes to be substituted when parsing diagnostic file paths. This should be the
+         /// reverse mapping of what is passed to `rustc` as `--remap-path-prefix`.
+         diagnostics_remapPrefix: FxHashMap<String, String> = FxHashMap::default(),
+ 
+         /// Run additional style lints.
+-        diagnostics_styleLints_enable: bool = false,
++        diagnostics_styleLints_enable: bool = cfg!(target_arch = "wasm32"),
+ 
+         /// List of warnings that should be displayed with hint severity.
+         ///
+@@ -701,7 +701,7 @@ pub enum MaxSubstitutionLength {
+         /// `Cargo.toml` or `.cargo/config.toml` changes.
+         cargo_autoreload: bool           = true,
+         /// Run build scripts (`build.rs`) for more precise code analysis.
+-        cargo_buildScripts_enable: bool  = true,
++        cargo_buildScripts_enable: bool  = !cfg!(target_arch = "wasm32"),
+         /// Specifies the invocation strategy to use when running the build scripts command.
+         /// If `per_workspace` is set, the command will be executed for each Rust workspace with the
+         /// workspace as the working directory.
+@@ -786,7 +786,7 @@ pub enum MaxSubstitutionLength {
+         cfg_setTest: bool = true,
+ 
+         /// Run the check command for diagnostics on save.
+-        checkOnSave | checkOnSave_enable: bool                         = true,
++        checkOnSave | checkOnSave_enable: bool                         = !cfg!(target_arch = "wasm32"),
+ 
+ 
+         /// Check all targets and tests (`--all-targets`). Defaults to
+@@ -2105,16 +2105,23 @@ pub fn ignored_proc_macros(
+     }
+ 
+     pub fn expand_proc_macros(&self) -> bool {
++        #[cfg(target_arch = "wasm32")]
++        return false;
++        #[cfg(not(target_arch = "wasm32"))]
+         self.procMacro_enable().to_owned()
+     }
+ 
+     pub fn files(&self) -> FilesConfig {
+         FilesConfig {
+-            watcher: match self.files_watcher() {
+-                FilesWatcherDef::Client if self.did_change_watched_files_dynamic_registration() => {
+-                    FilesWatcher::Client
++            watcher: if cfg!(target_arch = "wasm32") {
++                FilesWatcher::Client
++            } else {
++                match self.files_watcher() {
++                    FilesWatcherDef::Client if self.did_change_watched_files_dynamic_registration() => {
++                        FilesWatcher::Client
++                    }
++                    _ => FilesWatcher::Server,
+                 }
+-                _ => FilesWatcher::Server,
+             },
+             exclude: self.excluded().collect(),
+         }
+diff --git a/src/tools/rust-analyzer/crates/rust-analyzer/src/handlers/request.rs b/src/tools/rust-analyzer/crates/rust-analyzer/src/handlers/request.rs
+index 25c0aac..7a275f3 100644
+--- a/src/tools/rust-analyzer/crates/rust-analyzer/src/handlers/request.rs
++++ b/src/tools/rust-analyzer/crates/rust-analyzer/src/handlers/request.rs
+@@ -3,8 +3,6 @@
+ 
+ use std::{fs, io::Write as _, ops::Not, process::Stdio};
+ 
+-use anyhow::Context;
+-
+ use base64::{Engine, prelude::BASE64_STANDARD};
+ use ide::{
+     AnnotationConfig, AssistKind, AssistResolveStrategy, Cancellable, CompletionFieldsToResolve,
+@@ -2274,6 +2272,36 @@ fn should_skip_target(runnable: &Runnable, cargo_spec: Option<&TargetSpec>) -> b
+     }
+ }
+ 
++#[cfg(target_arch = "wasm32")]
++fn format_rust_wasm(text: &str, edition: syntax::Edition) -> Option<String> {
++    let mut config = rustfmt_nightly::Config::default();
++    config.set().emit_mode(rustfmt_nightly::EmitMode::Stdout);
++    config.set().verbose(rustfmt_nightly::Verbosity::Quiet);
++    config.set().show_parse_errors(false);
++    let rustfmt_ed = match edition {
++        syntax::Edition::Edition2015 => rustfmt_nightly::Edition::Edition2015,
++        syntax::Edition::Edition2018 => rustfmt_nightly::Edition::Edition2018,
++        syntax::Edition::Edition2021 => rustfmt_nightly::Edition::Edition2021,
++        syntax::Edition::Edition2024 => rustfmt_nightly::Edition::Edition2024,
++    };
++    config.set().edition(rustfmt_ed);
++    let mut out: Vec<u8> = Vec::with_capacity(text.len() * 2);
++    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++        let mut session = rustfmt_nightly::Session::new(config, Some(&mut out));
++        let res = session.format(rustfmt_nightly::Input::Text(text.to_owned()));
++        let failed =
++            res.is_err() || session.has_parsing_errors() || session.has_operational_errors();
++        drop(session);
++        if failed {
++            None
++        } else {
++            String::from_utf8(out).ok()
++        }
++    }))
++    .ok()
++    .flatten()
++}
++
+ fn run_rustfmt(
+     snap: &GlobalStateSnapshot,
+     text_document: TextDocumentIdentifier,
+@@ -2296,6 +2324,26 @@ fn run_rustfmt(
+     let edition = editions.iter().copied().max();
+ 
+     let line_index = snap.file_line_index(file_id)?;
++
++    if cfg!(target_arch = "wasm32") {
++        let Some(formatted) =
++            format_rust_wasm(&file, edition.unwrap_or(syntax::Edition::CURRENT))
++        else {
++            return Ok(None);
++        };
++        let (new_text, new_line_endings) = LineEndings::normalize(formatted);
++        if line_index.endings != new_line_endings {
++            return Ok(Some(to_proto::text_edit_vec(
++                &line_index,
++                TextEdit::replace(TextRange::up_to(TextSize::of(&*file)), new_text),
++            )));
++        } else if *file == new_text {
++            return Ok(None);
++        } else {
++            return Ok(Some(to_proto::text_edit_vec(&line_index, diff(&file, &new_text))));
++        }
++    }
++
+     let source_root_id = snap.analysis.source_root_id(file_id).ok();
+ 
+     // try to chdir to the file so we can respect `rustfmt.toml`
+@@ -2390,12 +2438,18 @@ fn run_rustfmt(
+     let output = {
+         let _p = tracing::info_span!("rustfmt", ?command).entered();
+ 
+-        let mut rustfmt = command
++        let mut rustfmt = match command
+             .stdin(Stdio::piped())
+             .stdout(Stdio::piped())
+             .stderr(Stdio::piped())
+             .spawn()
+-            .context(format!("Failed to spawn {command:?}"))?;
++        {
++            Ok(child) => child,
++            Err(e) => {
++                tracing::warn!(?command, "Failed to spawn rustfmt: {e}");
++                return Ok(None);
++            }
++        };
+ 
+         rustfmt.stdin.as_mut().unwrap().write_all(file.as_bytes())?;
+ 
+diff --git a/src/tools/rust-analyzer/crates/rust-analyzer/src/lsp/capabilities.rs b/src/tools/rust-analyzer/crates/rust-analyzer/src/lsp/capabilities.rs
+index f94e748..b2903bd 100644
+--- a/src/tools/rust-analyzer/crates/rust-analyzer/src/lsp/capabilities.rs
++++ b/src/tools/rust-analyzer/crates/rust-analyzer/src/lsp/capabilities.rs
+@@ -72,9 +72,13 @@ pub fn server_capabilities(config: &Config) -> ServerCapabilities {
+         code_action_provider: Some(config.caps().code_action_capabilities()),
+         code_lens_provider: Some(CodeLensOptions { resolve_provider: Some(true) }),
+         document_formatting_provider: Some(OneOf::Left(true)),
+-        document_range_formatting_provider: match config.rustfmt(None) {
+-            RustfmtConfig::Rustfmt { enable_range_formatting: true, .. } => Some(OneOf::Left(true)),
+-            _ => Some(OneOf::Left(false)),
++        document_range_formatting_provider: if cfg!(target_arch = "wasm32") {
++            None
++        } else {
++            match config.rustfmt(None) {
++                RustfmtConfig::Rustfmt { enable_range_formatting: true, .. } => Some(OneOf::Left(true)),
++                _ => Some(OneOf::Left(false)),
++            }
+         },
+         document_on_type_formatting_provider: Some({
+             let mut chars = ide::Analysis::SUPPORTED_TRIGGER_CHARS.iter();
+diff --git a/src/tools/rust-analyzer/crates/stdx/src/assert.rs b/src/tools/rust-analyzer/crates/stdx/src/assert.rs
+index 91c2797..debeb5b 100644
+--- a/src/tools/rust-analyzer/crates/stdx/src/assert.rs
++++ b/src/tools/rust-analyzer/crates/stdx/src/assert.rs
+@@ -59,7 +59,7 @@ macro_rules! always {
+ 
+     ($cond:expr, $fmt:literal $($arg:tt)*) => {{
+         let cond = $cond;
+-        if cfg!(debug_assertions) || $crate::assert::__FORCE {
++        if (cfg!(debug_assertions) && !cfg!(target_arch = "wasm32")) || $crate::assert::__FORCE {
+             assert!(cond, $fmt $($arg)*);
+         }
+         if !cond {
+@@ -91,7 +91,7 @@ macro_rules! never {
+     (false $($tt:tt)*) => { $crate::never!((false) $($tt)*) };
+     () => { $crate::never!("assertion failed: entered unreachable code") };
+     ($fmt:literal $(, $($arg:tt)*)?) => {{
+-        if cfg!(debug_assertions) || $crate::assert::__FORCE {
++        if (cfg!(debug_assertions) && !cfg!(target_arch = "wasm32")) || $crate::assert::__FORCE {
+             unreachable!($fmt $(, $($arg)*)?);
+         }
+         $crate::assert::__tracing_error!($fmt $(, $($arg)*)?);
+diff --git a/src/tools/rust-analyzer/crates/toolchain/Cargo.toml b/src/tools/rust-analyzer/crates/toolchain/Cargo.toml
+index f561c1c..d0d5840 100644
+--- a/src/tools/rust-analyzer/crates/toolchain/Cargo.toml
++++ b/src/tools/rust-analyzer/crates/toolchain/Cargo.toml
+@@ -13,7 +13,6 @@ rust-version.workspace = true
+ doctest = false
+ 
+ [dependencies]
+-home = "0.5.11"
+ camino.workspace = true
+ 
+ [lints]
+diff --git a/src/tools/rust-analyzer/crates/toolchain/src/lib.rs b/src/tools/rust-analyzer/crates/toolchain/src/lib.rs
+index 8b7bf1a..4465b7a 100644
+--- a/src/tools/rust-analyzer/crates/toolchain/src/lib.rs
++++ b/src/tools/rust-analyzer/crates/toolchain/src/lib.rs
+@@ -115,7 +115,8 @@ fn get_cargo_home() -> Option<Utf8PathBuf> {
+         return Utf8PathBuf::try_from(PathBuf::from(path)).ok();
+     }
+ 
+-    if let Some(mut path) = home::home_dir() {
++    #[allow(deprecated)]
++    if let Some(mut path) = env::home_dir() {
+         path.push(".cargo");
+         return Utf8PathBuf::try_from(path).ok();
+     }
+diff --git a/src/tools/rustfmt/src/lib.rs b/src/tools/rustfmt/src/lib.rs
+index 942b42e..b9daa31 100644
+--- a/src/tools/rustfmt/src/lib.rs
++++ b/src/tools/rustfmt/src/lib.rs
+@@ -18,6 +18,7 @@
+ 
+ // Necessary to pull in object code as the rest of the rustc crates are shipped only as rmeta
+ // files.
++#[cfg(not(target_arch = "wasm32"))]
+ #[allow(unused_extern_crates)]
+ extern crate rustc_driver;
+ 
+diff --git a/src/tools/rustfmt/src/parse/session.rs b/src/tools/rustfmt/src/parse/session.rs
+index 10e2809..30cc6ad 100644
+--- a/src/tools/rustfmt/src/parse/session.rs
++++ b/src/tools/rustfmt/src/parse/session.rs
+@@ -104,7 +104,18 @@ fn default_dcx(
+         ColorConfig::Never
+     };
+ 
++    #[cfg(not(target_arch = "wasm32"))]
+     let translator = rustc_driver::default_translator();
++    #[cfg(target_arch = "wasm32")]
++    let translator = rustc_errors::translation::Translator::with_fallback_bundle(
++        vec![
++            rustc_errors::DEFAULT_LOCALE_RESOURCE,
++            rustc_expand::DEFAULT_LOCALE_RESOURCE,
++            rustc_parse::DEFAULT_LOCALE_RESOURCE,
++            rustc_session::DEFAULT_LOCALE_RESOURCE,
++        ],
++        false,
++    );
+ 
+     let emitter: Box<DynEmitter> = if show_parse_errors {
+         Box::new(
