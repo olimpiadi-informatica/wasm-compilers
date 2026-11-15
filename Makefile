@@ -236,10 +236,18 @@ ${OUTPUT}/python.COPIED: build/python.BUILT build/python.OPT build/ty.OPT
 	touch "$@"
 
 ${OUTPUT}/rust.COPIED: build/rust.OPT build/rust.BUILT
+	rm -rf ${OUTPUT}/rust/lib
 	mkdir -p ${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib
 	cp -r build/rust/build/wasm32-wasip1-threads/stage2/lib/* ${OUTPUT}/rust/lib
 	cp -r build/rust/build/host/stage2/lib/rustlib/wasm32-wasip1-threads/lib/* ${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib
 	rm -rf ${OUTPUT}/rust/lib/rustlib/rustc-src ${OUTPUT}/rust/lib/rustlib/src
+	rm -f ${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib/libtest-*.rlib \
+		${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib/libgetopts-*.rlib \
+		${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib/libproc_macro-*.rlib \
+		${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib/librustc_literal_escaper-*.rlib \
+		${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib/libsysroot-*.rlib \
+		${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib/libpanic_unwind-*.rlib \
+		${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib/self-contained/crt1-reactor.o
 	touch "$@"
 
 test: test.sh ${OUTPUT}/cpp.COPIED ${OUTPUT}/python.COPIED ${OUTPUT}/rust.COPIED
