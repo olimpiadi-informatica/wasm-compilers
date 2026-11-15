@@ -196,7 +196,7 @@ build/rust.BUILT: build/llvm-host.BUILT build/libstdcxx.BUILT build/llvm.BUILT r
 	rsync -a --delete rust/ build/rust
 	cd build/rust && patch -p1 < ../../rust.patch
 	sed "s|%PWD%|$$PWD|" -i build/rust/config.toml build/rust/wasi-clang++.sh build/rust/wasi-ld.sh build/rust/wasm-llvm-config.sh
-	cd build/rust && ./x.py build compiler std --host wasm32-wasip1-threads --stage 2
+	cd build/rust && ./x.py build compiler std rust-analyzer --host wasm32-wasip1-threads --stage 2
 	touch "$@"
 
 build/cpp.clangd.OPT: build/llvm.BUILT
@@ -222,6 +222,7 @@ build/ty.OPT: build/ty.BUILT
 build/rust.OPT: build/rust.BUILT
 	mkdir -p ${OUTPUT}/rust/bin
 	wasm-opt --enable-sign-ext --enable-nontrapping-float-to-int --enable-threads --enable-bulk-memory ${WASM_OPT_FLAGS} build/rust/build/wasm32-wasip1-threads/stage2/bin/rustc.wasm -o ${OUTPUT}/rust/bin/rustc
+	wasm-opt --enable-sign-ext --enable-nontrapping-float-to-int --enable-threads --enable-bulk-memory --enable-simd ${WASM_OPT_FLAGS} build/rust/build/wasm32-wasip1-threads/stage2/bin/rust-analyzer.wasm -o ${OUTPUT}/rust/bin/rust-analyzer
 	touch "$@"
 
 ${OUTPUT}/cpp.COPIED: build/libstdcxx.BUILT build/llvm.BUILT build/cpp.clangd.OPT build/cpp.llvm.OPT
@@ -236,10 +237,35 @@ ${OUTPUT}/python.COPIED: build/python.BUILT build/python.OPT build/ty.OPT
 	touch "$@"
 
 ${OUTPUT}/rust.COPIED: build/rust.OPT build/rust.BUILT
+	rm -rf ${OUTPUT}/rust/lib
 	mkdir -p ${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib
 	cp -r build/rust/build/wasm32-wasip1-threads/stage2/lib/* ${OUTPUT}/rust/lib
 	cp -r build/rust/build/host/stage2/lib/rustlib/wasm32-wasip1-threads/lib/* ${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib
 	rm -rf ${OUTPUT}/rust/lib/rustlib/rustc-src ${OUTPUT}/rust/lib/rustlib/src
+	mkdir -p ${OUTPUT}/rust/lib/rustlib/src/rust/library/portable-simd/crates ${OUTPUT}/rust/lib/rustlib/src/rust/library/stdarch/crates/core_arch/src
+	cp -r build/rust/library/core build/rust/library/alloc build/rust/library/std build/rust/library/backtrace ${OUTPUT}/rust/lib/rustlib/src/rust/library/
+	cp -r build/rust/library/portable-simd/crates/core_simd build/rust/library/portable-simd/crates/std_float ${OUTPUT}/rust/lib/rustlib/src/rust/library/portable-simd/crates/
+	cp -r build/rust/library/stdarch/crates/core_arch/src/*.rs build/rust/library/stdarch/crates/core_arch/src/*.md build/rust/library/stdarch/crates/core_arch/src/wasm32 ${OUTPUT}/rust/lib/rustlib/src/rust/library/stdarch/crates/core_arch/src/
+	find ${OUTPUT}/rust/lib/rustlib/src/rust/library -type d \( -name tests -o -name benches \) -exec rm -rf {} +
+	rm -rf ${OUTPUT}/rust/lib/rustlib/src/rust/library/std/src/sys/pal/unix \
+		${OUTPUT}/rust/lib/rustlib/src/rust/library/std/src/sys/pal/windows \
+		${OUTPUT}/rust/lib/rustlib/src/rust/library/std/src/sys/pal/solid \
+		${OUTPUT}/rust/lib/rustlib/src/rust/library/std/src/sys/pal/hermit \
+		${OUTPUT}/rust/lib/rustlib/src/rust/library/std/src/sys/pal/trusty \
+		${OUTPUT}/rust/lib/rustlib/src/rust/library/std/src/sys/pal/wasip2 \
+		${OUTPUT}/rust/lib/rustlib/src/rust/library/std/src/sys/pal/xous \
+		${OUTPUT}/rust/lib/rustlib/src/rust/library/std/src/sys/pal/uefi \
+		${OUTPUT}/rust/lib/rustlib/src/rust/library/std/src/sys/pal/sgx \
+		${OUTPUT}/rust/lib/rustlib/src/rust/library/std/src/sys/pal/teeos \
+		${OUTPUT}/rust/lib/rustlib/src/rust/library/std/src/sys/pal/zkvm \
+		${OUTPUT}/rust/lib/rustlib/src/rust/library/std/src/sys/pal/itron
+	rm -f ${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib/libtest-*.rlib \
+		${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib/libgetopts-*.rlib \
+		${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib/libproc_macro-*.rlib \
+		${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib/librustc_literal_escaper-*.rlib \
+		${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib/libsysroot-*.rlib \
+		${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib/libpanic_unwind-*.rlib \
+		${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib/self-contained/crt1-reactor.o
 	touch "$@"
 
 test: test.sh ${OUTPUT}/cpp.COPIED ${OUTPUT}/python.COPIED ${OUTPUT}/rust.COPIED
