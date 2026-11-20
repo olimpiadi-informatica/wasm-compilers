@@ -31,12 +31,17 @@ MAKE := make -j$(shell nproc)
 
 RT_DIR := wasm32-unknown-wasip1-threads
 
+CORRETTO_VERSION := 25.0.4.10.1
+CORRETTO_URL := https://corretto.aws/downloads/resources/${CORRETTO_VERSION}/amazon-corretto-${CORRETTO_VERSION}-linux-x64.tar.gz
+CORRETTO_SHA256 := a45f1d385da8221fe1225dde5b6afa8e932a6acb93571b55eff4a39a2ebe7378
+
 all: ${OUTPUT}.DONE test
 
 base: build/libstdcxx.BUILT
 cpp: ${OUTPUT}/cpp.tar.br
 python: ${OUTPUT}/python.tar.br
 rust: ${OUTPUT}/rust.tar.br
+java: ${OUTPUT}/java.tar.br
 
 build:
 	mkdir -p build
@@ -199,6 +204,25 @@ build/rust.BUILT: build/llvm-host.BUILT build/libstdcxx.BUILT build/llvm.BUILT r
 	cd build/rust && ./x.py build compiler std rust-analyzer --host wasm32-wasip1-threads --stage 2
 	touch "$@"
 
+build/corretto-25.BUILT: | build
+	rm -rf build/corretto-25
+	mkdir -p build/corretto-25
+	curl --proto '=https' --tlsv1.2 -fLsS --retry 3 "${CORRETTO_URL}" -o build/corretto-25.tar.gz
+	echo "${CORRETTO_SHA256}  build/corretto-25.tar.gz" | sha256sum -c -
+	tar -xzf build/corretto-25.tar.gz --strip-components=1 -C build/corretto-25
+	rm -f build/corretto-25.tar.gz
+	touch "$@"
+
+build/teavm-javac.SRC: teavm-javac teavm-javac.patch | build
+	rsync -a --delete --exclude .git teavm-javac/ build/teavm-javac
+	cd build/teavm-javac && patch -p1 < ../../teavm-javac.patch
+	touch "$@"
+
+build/java.BUILT: build/teavm-javac.SRC build/corretto-25.BUILT
+	cd build/teavm-javac && JAVA_HOME="${DIR}/build/corretto-25" ./gradlew \
+		:compiler:buildWasmGC :compiler:generateClassLib :compiler:buildTeaVMClassLib --no-daemon
+	touch "$@"
+
 build/cpp.clangd.OPT: build/llvm.BUILT
 	mkdir -p ${OUTPUT}/cpp/bin
 	wasm-opt ${WASM_OPT_FLAGS} ${SYSROOT}/bin/clangd -o ${OUTPUT}/cpp/bin/clangd
@@ -268,7 +292,17 @@ ${OUTPUT}/rust.COPIED: build/rust.OPT build/rust.BUILT
 		${OUTPUT}/rust/lib/rustlib/wasm32-wasip1-threads/lib/self-contained/crt1-reactor.o
 	touch "$@"
 
-test: test.sh ${OUTPUT}/cpp.COPIED ${OUTPUT}/python.COPIED ${OUTPUT}/rust.COPIED
+${OUTPUT}/java.COPIED: build/java.BUILT
+	rm -rf ${OUTPUT}/java
+	mkdir -p ${OUTPUT}/java
+	cp build/teavm-javac/compiler/build/generated/teavm/wasm-gc/compiler.wasm \
+		build/teavm-javac/compiler/build/generated/teavm/wasm-gc/compiler.wasm-runtime.js \
+		build/teavm-javac/compiler/build/classlib/compile-classlib-teavm.bin \
+		build/teavm-javac/compiler/build/classlib/runtime-classlib-teavm.bin \
+		${OUTPUT}/java/
+	touch "$@"
+
+test: test.sh ${OUTPUT}/cpp.COPIED ${OUTPUT}/python.COPIED ${OUTPUT}/rust.COPIED ${OUTPUT}/java.COPIED
 	./test.sh
 
 %.tar: %.COPIED
@@ -277,11 +311,11 @@ test: test.sh ${OUTPUT}/cpp.COPIED ${OUTPUT}/python.COPIED ${OUTPUT}/rust.COPIED
 %.tar.br: %.tar
 	brotli -f $<
 
-${OUTPUT}.DONE: ${OUTPUT}/cpp.tar.br ${OUTPUT}/python.tar.br ${OUTPUT}/rust.tar.br
+${OUTPUT}.DONE: ${OUTPUT}/cpp.tar.br ${OUTPUT}/python.tar.br ${OUTPUT}/rust.tar.br ${OUTPUT}/java.tar.br
 
 clean:
 	rm -rf build/ cpython/cross-build
 
-.PHONY: all test clean base cpp python rust
+.PHONY: all test clean base cpp python rust java
 
 .NOTINTERMEDIATE:
