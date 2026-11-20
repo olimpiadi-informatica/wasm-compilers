@@ -150,15 +150,39 @@ jobs:
           path: build/output/rust.tar.br
           retention-days: 1
 
+  build-java:
+    name: Build Java Compiler
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install Deps
+        run: |
+          sudo apt update
+          sudo apt install -yy brotli curl rsync patch
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Build Java Target
+        run: make java
+      - name: Upload Java Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-artifact
+          path: build/output/java.tar.br
+          retention-days: 1
+
   test-and-release:
     name: Test and Release
-    needs: [build-python, build-cpp, build-rust]
+    needs: [build-python, build-cpp, build-rust, build-java]
     runs-on: ubuntu-24.04
     steps:
       - name: Install Deps
         run: |
           sudo apt update
           sudo apt install -yy build-essential clang brotli binaryen ninja-build gcc-multilib
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install wasmtime
@@ -170,13 +194,15 @@ jobs:
           path: downloaded-artifacts
       - name: Prepare Artifacts for Testing & Release
         run: |
-          mkdir -p build/output/cpp build/output/python build/output/rust
+          mkdir -p build/output/cpp build/output/python build/output/rust build/output/java
           cp downloaded-artifacts/cpp-artifact/cpp.tar.br build/output/
           cp downloaded-artifacts/python-artifact/python.tar.br build/output/
           cp downloaded-artifacts/rust-artifact/rust.tar.br build/output/
+          cp downloaded-artifacts/java-artifact/java.tar.br build/output/
           brotli -d build/output/cpp.tar.br -c | tar -x -C build/output/cpp
           brotli -d build/output/python.tar.br -c | tar -x -C build/output/python
           brotli -d build/output/rust.tar.br -c | tar -x -C build/output/rust
+          brotli -d build/output/java.tar.br -c | tar -x -C build/output/java
       - name: Run Test Suite
         run: ./test.sh
       - name: Upload release artifacts

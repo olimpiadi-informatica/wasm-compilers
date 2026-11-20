@@ -22,3 +22,6 @@
 [submodule "rust"]
 	path = rust
 	url = https://github.com/rust-lang/rust.git
+[submodule "teavm-javac"]
+	path = teavm-javac
+	url = https://github.com/konsoletyper/teavm-javac.git

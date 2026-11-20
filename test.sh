@@ -6,6 +6,7 @@ ROOT=$PWD/build/output
 CPPROOT=$ROOT/cpp
 PYROOT=$ROOT/python
 RSROOT=$ROOT/rust
+JAVAROOT=$ROOT/java
 
 DIR=build/test
 
@@ -146,4 +147,78 @@ while True:
 send({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": None})
 send({"jsonrpc": "2.0", "method": "exit", "params": None})
 assert proc.wait(timeout=10) == 0
+EOF
+
+node --input-type=module - "$JAVAROOT" <<'EOF'
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const javaRoot = process.argv[2];
+const { load } = await import(pathToFileURL(path.join(javaRoot, 'compiler.wasm-runtime.js')).href);
+const compilerBytes = fs.readFileSync(path.join(javaRoot, 'compiler.wasm'));
+const compileSdk = new Int8Array(fs.readFileSync(path.join(javaRoot, 'compile-classlib-teavm.bin')));
+const runtimeSdk = new Int8Array(fs.readFileSync(path.join(javaRoot, 'runtime-classlib-teavm.bin')));
+
+const compilerMod = await load(compilerBytes, {});
+const compiler = compilerMod.exports.createCompiler();
+compiler.setSdk(compileSdk);
+compiler.setTeaVMClasslib(runtimeSdk);
+const diagnostics = [];
+compiler.onDiagnostic(d => diagnostics.push(`${d.fileName}:${d.lineNumber}:${d.columnNumber}: ${d.severity}: ${d.message}`));
+compiler.addSourceFile('Main.java', `
+import java.io.*;
+import java.math.BigInteger;
+import java.util.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        Scanner sc = new Scanner(new File("input.txt"));
+        int a = sc.nextInt();
+        try (PrintWriter pw = new PrintWriter(new FileWriter("output.txt"))) {
+            pw.println(a);
+            List<String> list = new ArrayList<>(Arrays.asList(args));
+            Collections.sort(list);
+            pw.println("sorted=" + String.join(",", list));
+            pw.println("big=" + BigInteger.valueOf(a).multiply(BigInteger.valueOf(2)));
+        }
+        IO.println("io=ok");
+        for (int i = 0; i < args.length; i++) {
+            System.err.println(i + ": " + args[i]);
+        }
+    }
+}
+`);
+if (!compiler.compile()) {
+    throw new Error('javac failed:\n' + diagnostics.join('\n'));
+}
+const mains = compiler.detectMainClasses();
+if (mains.length !== 1 || mains[0] !== 'Main') {
+    throw new Error('unexpected main classes: ' + JSON.stringify(mains));
+}
+if (!(await compiler.generateWebAssembly({ mainClass: 'Main', outputName: 'app', obfuscated: false, asyncEnabled: false }))) {
+    throw new Error('TeaVM WasmGC codegen failed:\n' + diagnostics.join('\n'));
+}
+const appWasm = compiler.getWebAssemblyOutputFile('app.wasm');
+const stdinBytes = Buffer.from('13845\n', 'utf8');
+let stdinPos = 0;
+let stdout = '';
+let stderr = '';
+const app = await load(appWasm, {
+    installImports(imports) {
+        imports.teavmConsole.putcharStdout = ch => { stdout += String.fromCharCode(ch); };
+        imports.teavmConsole.putcharStderr = ch => { stderr += String.fromCharCode(ch); };
+        imports.teavmConsole.readStdin = () => stdinPos < stdinBytes.length ? stdinBytes[stdinPos++] : -1;
+        imports.teavmConsole.readStdinNonBlocking = () => stdinPos < stdinBytes.length ? stdinBytes[stdinPos++] : -1;
+    }
+});
+app.exports.main(['d', 'b', 'a', 'c']);
+const expectedOut = '13845\nsorted=a,b,c,d\nbig=27690\nio=ok\n';
+const expectedErr = '0: d\n1: b\n2: a\n3: c\n';
+if (stdout !== expectedOut) {
+    throw new Error(`unexpected stdout:\n${JSON.stringify(stdout)}\nexpected:\n${JSON.stringify(expectedOut)}`);
+}
+if (stderr !== expectedErr) {
+    throw new Error(`unexpected stderr:\n${JSON.stringify(stderr)}\nexpected:\n${JSON.stringify(expectedErr)}`);
+}
 EOF

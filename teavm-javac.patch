@@ -1,0 +1,1167 @@
+diff --git a/compiler/build.gradle b/compiler/build.gradle
+index e32d5a7..3d4004f 100644
+--- a/compiler/build.gradle
++++ b/compiler/build.gradle
+@@ -16,6 +16,11 @@ configurations {
+     }
+ }
+ 
++sourceSets {
++    classlibEmu {
++    }
++}
++
+ dependencies {
+     implementation project(":javac")
+     implementation project(":worker")
+@@ -27,6 +32,8 @@ dependencies {
+     classlibInput libs.teavm.jso
+     classlibInput libs.teavm.jso.apis
+     bootstrapCompiler libs.teavm.bootstrap.compiler
++    classlibEmuCompileOnly libs.teavm.core
++    classlibEmuCompileOnly libs.teavm.classlib
+ 
+     testImplementation libs.teavm.browser.runner
+     testImplementation libs.jackson.databind
+@@ -34,11 +41,6 @@ dependencies {
+     testRuntimeOnly libs.junit.platform.launcher
+ }
+ 
+-sourceSets {
+-    classlibEmu {
+-    }
+-}
+-
+ compileJava {
+     options.compilerArgs.addAll("--limit-modules", "java.base")
+ }
+@@ -76,24 +78,25 @@ tasks.register("generateClassLib", JavaExec) {
+     mainClass = "org.teavm.javac.StdlibConverter"
+ }
+ 
+-def buildTeaVMClassLib = tasks.register("buildTeaVMClassLib") {
++def buildTeaVMClassLib = tasks.register("buildTeaVMClassLib", JavaExec) {
+     def input = configurations.bootstrapCompiler
+     def outputFile = project.layout.buildDirectory.file("classlib/runtime-classlib-teavm.bin")
++    dependsOn input
++    dependsOn sourceSets.classlibEmu.output
+     inputs.files input
++    inputs.files {
++        sourceSets.classlibEmu.output.classesDirs.collect { fileTree(it) }
++    }
+     outputs.file outputFile
+-    doLast {
+-        def jar = input.singleFile
+-        def classlibEntry = "org/teavm/compiler/bootstrap/runtime-classlib-teavm.bin"
+-        def file = outputFile.get().asFile
+-        file.parentFile.mkdirs()
+-        new java.util.zip.ZipFile(jar).withCloseable { zip ->
+-            def entry = zip.getEntry(classlibEntry)
+-            if (entry == null) {
+-                throw new GradleException("$classlibEntry not found in $jar")
+-            }
+-            zip.getInputStream(entry).withCloseable { file.bytes = it.bytes }
+-        }
++    args {
++        [
++            outputFile.get().asFile.absolutePath,
++            input.singleFile.absolutePath,
++            *sourceSets.classlibEmu.output.classesDirs.files.collect { it.absolutePath }
++        ].iterator()
+     }
++    classpath sourceSets.main.output, sourceSets.main.runtimeClasspath
++    mainClass = "org.teavm.javac.RuntimeClasslibOverlay"
+ }
+ 
+ build {
+diff --git a/compiler/src/classlibEmu/java/org/teavm/classlib/java/io/TFileDescriptor.java b/compiler/src/classlibEmu/java/org/teavm/classlib/java/io/TFileDescriptor.java
+new file mode 100644
+index 0000000..3630e10
+--- /dev/null
++++ b/compiler/src/classlibEmu/java/org/teavm/classlib/java/io/TFileDescriptor.java
+@@ -0,0 +1,21 @@
++package org.teavm.classlib.java.io;
++
++public final class TFileDescriptor {
++    public static final TFileDescriptor in = new TFileDescriptor(0);
++    public static final TFileDescriptor out = new TFileDescriptor(1);
++    public static final TFileDescriptor err = new TFileDescriptor(2);
++
++    final int fd;
++
++    public TFileDescriptor() {
++        this.fd = -1;
++    }
++
++    private TFileDescriptor(int fd) {
++        this.fd = fd;
++    }
++
++    public boolean valid() {
++        return fd >= 0;
++    }
++}
+diff --git a/compiler/src/classlibEmu/java/org/teavm/classlib/java/io/TFileInputStream.java b/compiler/src/classlibEmu/java/org/teavm/classlib/java/io/TFileInputStream.java
+new file mode 100644
+index 0000000..d4750e8
+--- /dev/null
++++ b/compiler/src/classlibEmu/java/org/teavm/classlib/java/io/TFileInputStream.java
+@@ -0,0 +1,111 @@
++package org.teavm.classlib.java.io;
++
++import java.io.FileNotFoundException;
++import java.io.IOException;
++import java.io.InputStream;
++import org.teavm.runtime.fs.VirtualFile;
++import org.teavm.runtime.fs.VirtualFileAccessor;
++
++public class TFileInputStream extends InputStream {
++    private VirtualFileAccessor accessor;
++    private InputStream delegate;
++
++    private static boolean isInputTxt(String path) {
++        if (path == null) {
++            return false;
++        }
++        String p = path;
++        while (p.startsWith("./") || p.startsWith("/")) {
++            p = p.startsWith("./") ? p.substring(2) : p.substring(1);
++        }
++        return p.equals("input.txt");
++    }
++
++    public TFileInputStream(TFile file) throws FileNotFoundException {
++        if (isInputTxt(file.getPath())) {
++            this.delegate = System.in;
++            return;
++        }
++        VirtualFile vf = file.findVirtualFile();
++        if (vf == null || !vf.isFile()) {
++            throw new FileNotFoundException(file.getPath());
++        }
++        accessor = vf.createAccessor(true, false, false);
++        if (accessor == null) {
++            throw new FileNotFoundException(file.getPath());
++        }
++    }
++
++    public TFileInputStream(String path) throws FileNotFoundException {
++        this(new TFile(path));
++    }
++
++    public TFileInputStream(TFileDescriptor fd) {
++        if (fd != null && fd.fd == 0) {
++            this.delegate = System.in;
++        }
++    }
++
++    public TFileInputStream(VirtualFileAccessor accessor) {
++        this.accessor = accessor;
++    }
++
++    @Override
++    public int read() throws IOException {
++        if (delegate != null) {
++            return delegate.read();
++        }
++        byte[] buf = new byte[1];
++        int n = read(buf, 0, 1);
++        return n < 0 ? -1 : (buf[0] & 0xFF);
++    }
++
++    @Override
++    public int read(byte[] b, int off, int len) throws IOException {
++        if (delegate != null) {
++            return delegate.read(b, off, len);
++        }
++        if (accessor == null) {
++            throw new IOException("Stream closed");
++        }
++        int n = accessor.read(b, off, len);
++        return n == 0 && len > 0 ? -1 : n;
++    }
++
++    @Override
++    public long skip(long n) throws IOException {
++        if (delegate != null) {
++            return delegate.skip(n);
++        }
++        if (accessor == null) {
++            throw new IOException("Stream closed");
++        }
++        if (n <= 0) {
++            return 0;
++        }
++        int pos = accessor.tell();
++        int size = accessor.size();
++        int toSkip = (int) Math.min(n, size - pos);
++        accessor.skip(toSkip);
++        return toSkip;
++    }
++
++    @Override
++    public int available() throws IOException {
++        if (delegate != null) {
++            return delegate.available();
++        }
++        if (accessor == null) {
++            return 0;
++        }
++        return Math.max(0, accessor.size() - accessor.tell());
++    }
++
++    @Override
++    public void close() throws IOException {
++        if (accessor != null) {
++            accessor.close();
++            accessor = null;
++        }
++    }
++}
+diff --git a/compiler/src/classlibEmu/java/org/teavm/classlib/java/io/TFileOutputStream.java b/compiler/src/classlibEmu/java/org/teavm/classlib/java/io/TFileOutputStream.java
+new file mode 100644
+index 0000000..a9f85cf
+--- /dev/null
++++ b/compiler/src/classlibEmu/java/org/teavm/classlib/java/io/TFileOutputStream.java
+@@ -0,0 +1,114 @@
++package org.teavm.classlib.java.io;
++
++import java.io.FileNotFoundException;
++import java.io.IOException;
++import java.io.OutputStream;
++import org.teavm.runtime.fs.VirtualFile;
++import org.teavm.runtime.fs.VirtualFileAccessor;
++
++public class TFileOutputStream extends OutputStream {
++    private VirtualFileAccessor accessor;
++    private OutputStream delegate;
++
++    private static boolean isOutputTxt(String path) {
++        if (path == null) {
++            return false;
++        }
++        String p = path;
++        while (p.startsWith("./") || p.startsWith("/")) {
++            p = p.startsWith("./") ? p.substring(2) : p.substring(1);
++        }
++        return p.equals("output.txt");
++    }
++
++    public TFileOutputStream(TFile file) throws FileNotFoundException {
++        this(file, false);
++    }
++
++    public TFileOutputStream(String path) throws FileNotFoundException {
++        this(new TFile(path), false);
++    }
++
++    public TFileOutputStream(String path, boolean append) throws FileNotFoundException {
++        this(new TFile(path), append);
++    }
++
++    public TFileOutputStream(TFile file, boolean append) throws FileNotFoundException {
++        if (isOutputTxt(file.getPath())) {
++            this.delegate = System.out;
++            return;
++        }
++        VirtualFile vf = file.findVirtualFile();
++        if (vf == null) {
++            try {
++                file.createNewFile();
++            } catch (IOException e) {
++                throw new FileNotFoundException(file.getPath());
++            }
++            vf = file.findVirtualFile();
++        }
++        if (vf == null || !vf.isFile()) {
++            throw new FileNotFoundException(file.getPath());
++        }
++        accessor = vf.createAccessor(false, true, append);
++        if (accessor == null) {
++            throw new FileNotFoundException(file.getPath());
++        }
++    }
++
++    public TFileOutputStream(TFileDescriptor fd) {
++        if (fd != null && fd.fd == 1) {
++            this.delegate = System.out;
++        } else if (fd != null && fd.fd == 2) {
++            this.delegate = System.err;
++        }
++    }
++
++    public TFileOutputStream(VirtualFileAccessor accessor) {
++        this.accessor = accessor;
++    }
++
++    @Override
++    public void write(int b) throws IOException {
++        if (delegate != null) {
++            delegate.write(b);
++            return;
++        }
++        write(new byte[] { (byte) b }, 0, 1);
++    }
++
++    @Override
++    public void write(byte[] b, int off, int len) throws IOException {
++        if (delegate != null) {
++            delegate.write(b, off, len);
++            return;
++        }
++        if (accessor == null) {
++            throw new IOException("Stream closed");
++        }
++        accessor.write(b, off, len);
++    }
++
++    @Override
++    public void flush() throws IOException {
++        if (delegate != null) {
++            delegate.flush();
++            return;
++        }
++        if (accessor != null) {
++            accessor.flush();
++        }
++    }
++
++    @Override
++    public void close() throws IOException {
++        if (delegate != null) {
++            delegate.flush();
++            return;
++        }
++        if (accessor != null) {
++            accessor.close();
++            accessor = null;
++        }
++    }
++}
+diff --git a/compiler/src/classlibEmu/java/org/teavm/classlib/java/lang/TConsoleInputStream.java b/compiler/src/classlibEmu/java/org/teavm/classlib/java/lang/TConsoleInputStream.java
+new file mode 100644
+index 0000000..8b125f2
+--- /dev/null
++++ b/compiler/src/classlibEmu/java/org/teavm/classlib/java/lang/TConsoleInputStream.java
+@@ -0,0 +1,46 @@
++package org.teavm.classlib.java.lang;
++
++import java.io.IOException;
++import java.io.InputStream;
++import org.teavm.interop.Import;
++
++class TConsoleInputStream extends InputStream {
++    @Import(module = "teavmConsole", name = "readStdin")
++    private static native int readStdin();
++
++    @Import(module = "teavmConsole", name = "readStdinNonBlocking")
++    private static native int readStdinNonBlocking();
++
++    @Override
++    public int read() throws IOException {
++        return readStdin();
++    }
++
++    @Override
++    public int read(byte[] b, int off, int len) throws IOException {
++        if (b == null) {
++            throw new NullPointerException();
++        }
++        if (off < 0 || len < 0 || len > b.length - off) {
++            throw new IndexOutOfBoundsException();
++        }
++        if (len == 0) {
++            return 0;
++        }
++        int first = readStdin();
++        if (first < 0) {
++            return -1;
++        }
++        b[off] = (byte) first;
++        int count = 1;
++        while (count < len) {
++            int next = readStdinNonBlocking();
++            if (next < 0) {
++                break;
++            }
++            b[off + count] = (byte) next;
++            count++;
++        }
++        return count;
++    }
++}
+diff --git a/compiler/src/classlibEmu/java/org/teavm/classlib/java/lang/TIO.java b/compiler/src/classlibEmu/java/org/teavm/classlib/java/lang/TIO.java
+new file mode 100644
+index 0000000..9c0cd01
+--- /dev/null
++++ b/compiler/src/classlibEmu/java/org/teavm/classlib/java/lang/TIO.java
+@@ -0,0 +1,43 @@
++package org.teavm.classlib.java.lang;
++
++import java.io.BufferedReader;
++import java.io.IOException;
++import java.io.InputStreamReader;
++import java.io.UncheckedIOException;
++import java.nio.charset.StandardCharsets;
++
++public final class TIO {
++    private static BufferedReader reader;
++
++    private TIO() {
++    }
++
++    public static void print(Object obj) {
++        System.out.print(obj);
++        System.out.flush();
++    }
++
++    public static void println() {
++        System.out.println();
++    }
++
++    public static void println(Object obj) {
++        System.out.println(obj);
++    }
++
++    public static String readln() {
++        if (reader == null) {
++            reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
++        }
++        try {
++            return reader.readLine();
++        } catch (IOException e) {
++            throw new UncheckedIOException(e);
++        }
++    }
++
++    public static String readln(String prompt) {
++        print(prompt);
++        return readln();
++    }
++}
+diff --git a/compiler/src/classlibEmu/java/org/teavm/classlib/java/util/TInputMismatchException.java b/compiler/src/classlibEmu/java/org/teavm/classlib/java/util/TInputMismatchException.java
+new file mode 100644
+index 0000000..bb2cb25
+--- /dev/null
++++ b/compiler/src/classlibEmu/java/org/teavm/classlib/java/util/TInputMismatchException.java
+@@ -0,0 +1,11 @@
++package org.teavm.classlib.java.util;
++
++public class TInputMismatchException extends TNoSuchElementException {
++    public TInputMismatchException() {
++        super();
++    }
++
++    public TInputMismatchException(String s) {
++        super(s);
++    }
++}
+diff --git a/compiler/src/classlibEmu/java/org/teavm/classlib/java/util/TScanner.java b/compiler/src/classlibEmu/java/org/teavm/classlib/java/util/TScanner.java
+new file mode 100644
+index 0000000..9953a2e
+--- /dev/null
++++ b/compiler/src/classlibEmu/java/org/teavm/classlib/java/util/TScanner.java
+@@ -0,0 +1,522 @@
++package org.teavm.classlib.java.util;
++
++import java.io.BufferedReader;
++import java.io.Closeable;
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileNotFoundException;
++import java.io.IOException;
++import java.io.InputStream;
++import java.io.InputStreamReader;
++import java.io.Reader;
++import java.io.StringReader;
++import java.math.BigDecimal;
++import java.math.BigInteger;
++import java.nio.CharBuffer;
++import java.nio.charset.StandardCharsets;
++import java.util.InputMismatchException;
++import java.util.Iterator;
++import java.util.Locale;
++import java.util.NoSuchElementException;
++import java.util.regex.Pattern;
++
++public final class TScanner implements Iterator<String>, Closeable {
++    private final Reader reader;
++    private final StringBuilder buf = new StringBuilder();
++    private int pos = 0;
++    private boolean eof = false;
++    private boolean closed = false;
++    private int defaultRadix = 10;
++    private Locale locale = Locale.getDefault();
++    private Pattern delimiterPattern = null; // null => default whitespace
++
++    public TScanner(InputStream source) {
++        this(new BufferedReader(new InputStreamReader(source, StandardCharsets.UTF_8)));
++    }
++
++    public TScanner(InputStream source, String charsetName) {
++        this(new BufferedReader(new InputStreamReader(source, StandardCharsets.UTF_8)));
++    }
++
++    public TScanner(File source) throws FileNotFoundException {
++        this(new FileInputStream(source));
++    }
++
++    public TScanner(File source, String charsetName) throws FileNotFoundException {
++        this(new FileInputStream(source), charsetName);
++    }
++
++    public TScanner(String source) {
++        this(new StringReader(source));
++    }
++
++    public TScanner(Readable source) {
++        if (source instanceof Reader) {
++            this.reader = (Reader) source;
++        } else {
++            this.reader = new Reader() {
++                @Override
++                public int read(char[] cbuf, int off, int len) throws IOException {
++                    CharBuffer cb = CharBuffer.wrap(cbuf, off, len);
++                    return source.read(cb);
++                }
++
++                @Override
++                public void close() throws IOException {
++                    if (source instanceof Closeable) {
++                        ((Closeable) source).close();
++                    }
++                }
++            };
++        }
++    }
++
++    private void compact() {
++        if (pos > 0 && pos >= 4096) {
++            buf.delete(0, pos);
++            pos = 0;
++        }
++    }
++
++    private boolean fill() {
++        if (eof || closed) {
++            return false;
++        }
++        compact();
++        char[] tmp = new char[4096];
++        try {
++            int n = reader.read(tmp, 0, tmp.length);
++            if (n < 0) {
++                eof = true;
++                return false;
++            }
++            if (n > 0) {
++                buf.append(tmp, 0, n);
++                return true;
++            }
++            return false;
++        } catch (IOException e) {
++            eof = true;
++            return false;
++        }
++    }
++
++    private boolean ensureAvailable() {
++        if (pos < buf.length()) {
++            return true;
++        }
++        return fill();
++    }
++
++    private String peekToken(boolean consume) {
++        if (closed) {
++            throw new IllegalStateException("Scanner closed");
++        }
++        if (delimiterPattern != null) {
++            return peekTokenRegex(consume);
++        }
++        int cur = pos;
++        // Skip leading whitespace
++        while (true) {
++            while (cur < buf.length() && Character.isWhitespace(buf.charAt(cur))) {
++                cur++;
++            }
++            if (cur < buf.length()) {
++                break;
++            }
++            if (!fill()) {
++                return null;
++            }
++            cur = pos;
++            while (cur < buf.length() && Character.isWhitespace(buf.charAt(cur))) {
++                cur++;
++            }
++            if (cur < buf.length()) {
++                break;
++            }
++        }
++        int start = cur;
++        // Read token characters until whitespace or EOF
++        while (true) {
++            while (cur < buf.length() && !Character.isWhitespace(buf.charAt(cur))) {
++                cur++;
++            }
++            if (cur < buf.length() || eof) {
++                break;
++            }
++            int offset = start - pos;
++            int relCur = cur - pos;
++            if (!fill()) {
++                start = pos + offset;
++                cur = pos + relCur;
++                break;
++            }
++            start = pos + offset;
++            cur = pos + relCur;
++        }
++        String token = buf.substring(start, cur);
++        if (consume) {
++            pos = cur;
++        }
++        return token;
++    }
++
++    private String peekTokenRegex(boolean consume) {
++        while (!eof && fill()) {
++            // Read available input for regex delimiter matching
++        }
++        String rest = buf.substring(pos);
++        var matcher = delimiterPattern.matcher(rest);
++        int start = 0;
++        while (start < rest.length() && matcher.find(start) && matcher.start() == start) {
++            if (matcher.end() == start) {
++                break;
++            }
++            start = matcher.end();
++        }
++        if (start >= rest.length()) {
++            return null;
++        }
++        int end = rest.length();
++        if (matcher.find(start)) {
++            end = matcher.start();
++        }
++        String token = rest.substring(start, end);
++        if (consume) {
++            pos += end;
++        }
++        return token;
++    }
++
++    @Override
++    public boolean hasNext() {
++        return peekToken(false) != null;
++    }
++
++    @Override
++    public String next() {
++        String token = peekToken(true);
++        if (token == null) {
++            throw new NoSuchElementException();
++        }
++        return token;
++    }
++
++    public boolean hasNextLine() {
++        if (closed) {
++            throw new IllegalStateException("Scanner closed");
++        }
++        return ensureAvailable();
++    }
++
++    public String nextLine() {
++        if (closed) {
++            throw new IllegalStateException("Scanner closed");
++        }
++        if (!ensureAvailable()) {
++            throw new NoSuchElementException("No line found");
++        }
++        int cur = pos;
++        while (true) {
++            while (cur < buf.length()) {
++                char c = buf.charAt(cur);
++                if (c == '\n' || c == '\r') {
++                    String line = buf.substring(pos, cur);
++                    pos = cur + 1;
++                    if (c == '\r') {
++                        if (pos < buf.length() || fill()) {
++                            if (pos < buf.length() && buf.charAt(pos) == '\n') {
++                                pos++;
++                            }
++                        }
++                    }
++                    return line;
++                }
++                cur++;
++            }
++            int relCur = cur - pos;
++            if (!fill()) {
++                String line = buf.substring(pos);
++                pos = buf.length();
++                return line;
++            }
++            cur = pos + relCur;
++        }
++    }
++
++    public boolean hasNextInt() {
++        return hasNextInt(defaultRadix);
++    }
++
++    public boolean hasNextInt(int radix) {
++        String t = peekToken(false);
++        if (t == null) {
++            return false;
++        }
++        try {
++            Integer.parseInt(t, radix);
++            return true;
++        } catch (NumberFormatException e) {
++            return false;
++        }
++    }
++
++    public int nextInt() {
++        return nextInt(defaultRadix);
++    }
++
++    public int nextInt(int radix) {
++        String t = next();
++        try {
++            return Integer.parseInt(t, radix);
++        } catch (NumberFormatException e) {
++            throw new InputMismatchException("For input string: \"" + t + "\"");
++        }
++    }
++
++    public boolean hasNextLong() {
++        return hasNextLong(defaultRadix);
++    }
++
++    public boolean hasNextLong(int radix) {
++        String t = peekToken(false);
++        if (t == null) {
++            return false;
++        }
++        try {
++            Long.parseLong(t, radix);
++            return true;
++        } catch (NumberFormatException e) {
++            return false;
++        }
++    }
++
++    public long nextLong() {
++        return nextLong(defaultRadix);
++    }
++
++    public long nextLong(int radix) {
++        String t = next();
++        try {
++            return Long.parseLong(t, radix);
++        } catch (NumberFormatException e) {
++            throw new InputMismatchException("For input string: \"" + t + "\"");
++        }
++    }
++
++    public boolean hasNextShort() {
++        return hasNextShort(defaultRadix);
++    }
++
++    public boolean hasNextShort(int radix) {
++        String t = peekToken(false);
++        if (t == null) {
++            return false;
++        }
++        try {
++            Short.parseShort(t, radix);
++            return true;
++        } catch (NumberFormatException e) {
++            return false;
++        }
++    }
++
++    public short nextShort() {
++        return nextShort(defaultRadix);
++    }
++
++    public short nextShort(int radix) {
++        String t = next();
++        try {
++            return Short.parseShort(t, radix);
++        } catch (NumberFormatException e) {
++            throw new InputMismatchException("For input string: \"" + t + "\"");
++        }
++    }
++
++    public boolean hasNextByte() {
++        return hasNextByte(defaultRadix);
++    }
++
++    public boolean hasNextByte(int radix) {
++        String t = peekToken(false);
++        if (t == null) {
++            return false;
++        }
++        try {
++            Byte.parseByte(t, radix);
++            return true;
++        } catch (NumberFormatException e) {
++            return false;
++        }
++    }
++
++    public byte nextByte() {
++        return nextByte(defaultRadix);
++    }
++
++    public byte nextByte(int radix) {
++        String t = next();
++        try {
++            return Byte.parseByte(t, radix);
++        } catch (NumberFormatException e) {
++            throw new InputMismatchException("For input string: \"" + t + "\"");
++        }
++    }
++
++    public boolean hasNextDouble() {
++        String t = peekToken(false);
++        if (t == null) {
++            return false;
++        }
++        try {
++            Double.parseDouble(t);
++            return true;
++        } catch (NumberFormatException e) {
++            return false;
++        }
++    }
++
++    public double nextDouble() {
++        String t = next();
++        try {
++            return Double.parseDouble(t);
++        } catch (NumberFormatException e) {
++            throw new InputMismatchException("For input string: \"" + t + "\"");
++        }
++    }
++
++    public boolean hasNextFloat() {
++        String t = peekToken(false);
++        if (t == null) {
++            return false;
++        }
++        try {
++            Float.parseFloat(t);
++            return true;
++        } catch (NumberFormatException e) {
++            return false;
++        }
++    }
++
++    public float nextFloat() {
++        String t = next();
++        try {
++            return Float.parseFloat(t);
++        } catch (NumberFormatException e) {
++            throw new InputMismatchException("For input string: \"" + t + "\"");
++        }
++    }
++
++    public boolean hasNextBoolean() {
++        String t = peekToken(false);
++        return t != null && (t.equalsIgnoreCase("true") || t.equalsIgnoreCase("false"));
++    }
++
++    public boolean nextBoolean() {
++        String t = next();
++        if (t.equalsIgnoreCase("true")) {
++            return true;
++        }
++        if (t.equalsIgnoreCase("false")) {
++            return false;
++        }
++        throw new InputMismatchException("For input string: \"" + t + "\"");
++    }
++
++    public boolean hasNextBigInteger() {
++        return hasNextBigInteger(defaultRadix);
++    }
++
++    public boolean hasNextBigInteger(int radix) {
++        String t = peekToken(false);
++        if (t == null) {
++            return false;
++        }
++        try {
++            new BigInteger(t, radix);
++            return true;
++        } catch (NumberFormatException e) {
++            return false;
++        }
++    }
++
++    public BigInteger nextBigInteger() {
++        return nextBigInteger(defaultRadix);
++    }
++
++    public BigInteger nextBigInteger(int radix) {
++        String t = next();
++        try {
++            return new BigInteger(t, radix);
++        } catch (NumberFormatException e) {
++            throw new InputMismatchException("For input string: \"" + t + "\"");
++        }
++    }
++
++    public boolean hasNextBigDecimal() {
++        String t = peekToken(false);
++        if (t == null) {
++            return false;
++        }
++        try {
++            new BigDecimal(t);
++            return true;
++        } catch (NumberFormatException e) {
++            return false;
++        }
++    }
++
++    public BigDecimal nextBigDecimal() {
++        String t = next();
++        try {
++            return new BigDecimal(t);
++        } catch (NumberFormatException e) {
++            throw new InputMismatchException("For input string: \"" + t + "\"");
++        }
++    }
++
++    public TScanner useDelimiter(Pattern pattern) {
++        this.delimiterPattern = pattern;
++        return this;
++    }
++
++    public TScanner useDelimiter(String pattern) {
++        this.delimiterPattern = Pattern.compile(pattern);
++        return this;
++    }
++
++    public TScanner useLocale(Locale locale) {
++        this.locale = locale;
++        return this;
++    }
++
++    public Locale locale() {
++        return this.locale;
++    }
++
++    public TScanner useRadix(int radix) {
++        this.defaultRadix = radix;
++        return this;
++    }
++
++    public int radix() {
++        return this.defaultRadix;
++    }
++
++    @Override
++    public void remove() {
++        throw new UnsupportedOperationException();
++    }
++
++    @Override
++    public void close() {
++        if (!closed) {
++            closed = true;
++            try {
++                reader.close();
++            } catch (IOException ignored) {
++            }
++        }
++    }
++}
+diff --git a/compiler/src/main/java/org/teavm/javac/RuntimeClasslibOverlay.java b/compiler/src/main/java/org/teavm/javac/RuntimeClasslibOverlay.java
+new file mode 100644
+index 0000000..128f575
+--- /dev/null
++++ b/compiler/src/main/java/org/teavm/javac/RuntimeClasslibOverlay.java
+@@ -0,0 +1,62 @@
++package org.teavm.javac;
++
++import java.io.IOException;
++import java.io.UncheckedIOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.LinkedHashMap;
++import java.util.zip.ZipFile;
++import org.teavm.compiler.bootstrap.ArchiveReader;
++import org.teavm.compiler.bootstrap.tools.ArchiveBuilder;
++
++public class RuntimeClasslibOverlay {
++    private static final String CLASSLIB_ENTRY = "org/teavm/compiler/bootstrap/runtime-classlib-teavm.bin";
++
++    public static void main(String[] args) throws IOException {
++        if (args.length < 2) {
++            throw new IllegalArgumentException("Usage: RuntimeClasslibOverlay <output> <bootstrap-jar> [overlay-dir...]");
++        }
++        var outputPath = Path.of(args[0]);
++        var bootstrapJar = Path.of(args[1]);
++        var entries = new LinkedHashMap<String, byte[]>();
++
++        try (var zip = new ZipFile(bootstrapJar.toFile())) {
++            var entry = zip.getEntry(CLASSLIB_ENTRY);
++            if (entry == null) {
++                throw new IOException(CLASSLIB_ENTRY + " not found in " + bootstrapJar);
++            }
++            try (var reader = new ArchiveReader(zip.getInputStream(entry))) {
++                String name;
++                while ((name = reader.readNext()) != null) {
++                    entries.put(name, reader.readData());
++                }
++            }
++        }
++
++        for (int i = 2; i < args.length; i++) {
++            var dir = Path.of(args[i]);
++            if (!Files.isDirectory(dir)) {
++                continue;
++            }
++            try (var stream = Files.walk(dir)) {
++                stream.forEach(path -> {
++                    if (Files.isRegularFile(path) && path.getFileName().toString().endsWith(".class")) {
++                        var relName = dir.relativize(path).toString().replace('\\', '/');
++                        try {
++                            entries.put(relName, Files.readAllBytes(path));
++                        } catch (IOException e) {
++                            throw new UncheckedIOException(e);
++                        }
++                    }
++                });
++            }
++        }
++
++        Files.createDirectories(outputPath.getParent());
++        try (var builder = new ArchiveBuilder(Files.newOutputStream(outputPath))) {
++            for (var entry : entries.entrySet()) {
++                builder.append(entry.getKey(), entry.getValue());
++            }
++        }
++    }
++}
+diff --git a/compiler/src/main/java/org/teavm/javac/StdlibConverter.java b/compiler/src/main/java/org/teavm/javac/StdlibConverter.java
+index 84c6f77..dff1a87 100644
+--- a/compiler/src/main/java/org/teavm/javac/StdlibConverter.java
++++ b/compiler/src/main/java/org/teavm/javac/StdlibConverter.java
+@@ -25,6 +25,7 @@ import java.io.UncheckedIOException;
+ import java.nio.file.Files;
+ import java.util.HashMap;
+ import java.util.HashSet;
++import java.util.LinkedHashMap;
+ import java.util.LinkedHashSet;
+ import java.util.Map;
+ import java.util.Set;
+@@ -496,38 +497,42 @@ public class StdlibConverter extends ClassVisitor {
+     }
+ 
+     public static void main(String[] args) throws IOException {
+-        try (var output = new ArchiveBuilder(new FileOutputStream(args[0]))) {
+-            var packageNames = new LinkedHashSet<String>();
+-            for (var i = 1; i < args.length; ++i) {
+-                var file = new File(args[i]);
+-                if (file.isFile()) {
+-                    try (var input = new ZipInputStream(new FileInputStream(args[i]))) {
+-                        while (true) {
+-                            ZipEntry entry = input.getNextEntry();
+-                            if (entry == null) {
+-                                break;
+-                            }
+-                            if (entry.isDirectory() || !entry.getName().endsWith(".class")) {
+-                                continue;
+-                            }
+-
+-                            addFile(input, output, packageNames);
++        var entries = new LinkedHashMap<String, byte[]>();
++        var packageNames = new LinkedHashSet<String>();
++        for (var i = 1; i < args.length; ++i) {
++            var file = new File(args[i]);
++            if (file.isFile()) {
++                try (var input = new ZipInputStream(new FileInputStream(args[i]))) {
++                    while (true) {
++                        ZipEntry entry = input.getNextEntry();
++                        if (entry == null) {
++                            break;
+                         }
++                        if (entry.isDirectory() || !entry.getName().endsWith(".class")) {
++                            continue;
++                        }
++
++                        addFile(input, entries, packageNames);
+                     }
+-                } else {
+-                    try (var stream = Files.walk(file.toPath())) {
+-                        stream.forEach(path -> {
+-                            if (Files.isRegularFile(path) && path.getFileName().toString().endsWith(".class")) {
+-                                try {
+-                                    addFile(Files.newInputStream(path), output, packageNames);
+-                                } catch (IOException e) {
+-                                    throw new UncheckedIOException(e);
+-                                }
++                }
++            } else {
++                try (var stream = Files.walk(file.toPath())) {
++                    stream.forEach(path -> {
++                        if (Files.isRegularFile(path) && path.getFileName().toString().endsWith(".class")) {
++                            try (var in = Files.newInputStream(path)) {
++                                addFile(in, entries, packageNames);
++                            } catch (IOException e) {
++                                throw new UncheckedIOException(e);
+                             }
+-                        });
+-                    }
++                        }
++                    });
+                 }
+             }
++        }
++        try (var output = new ArchiveBuilder(new FileOutputStream(args[0]))) {
++            for (var entry : entries.entrySet()) {
++                output.append(entry.getKey(), entry.getValue());
++            }
+             if (!packageNames.isEmpty()) {
+                 var writer = new ClassWriter(0);
+                 writer.visit(Opcodes.V21, Opcodes.ACC_MODULE, "java.base", null, null, null);
+@@ -541,7 +546,8 @@ public class StdlibConverter extends ClassVisitor {
+         }
+     }
+ 
+-    private static void addFile(InputStream input, ArchiveBuilder output, Set<String> packageNames) throws IOException {
++    private static void addFile(InputStream input, Map<String, byte[]> entries, Set<String> packageNames)
++            throws IOException {
+         ClassReader reader = new ClassReader(input);
+         ClassWriter writer = new ClassWriter(0);
+         StdlibConverter converter = new StdlibConverter(writer, collectMethodRenames(reader));
+@@ -549,7 +555,7 @@ public class StdlibConverter extends ClassVisitor {
+                 | ClassReader.SKIP_DEBUG);
+         if (converter.visible) {
+             var outputName = converter.className + ".class";
+-            output.append(outputName, writer.toByteArray());
++            entries.put(outputName, writer.toByteArray());
+         }
+         if (converter.className != null) {
+             var index = converter.className.lastIndexOf('/');
+diff --git a/gradle/libs.versions.toml b/gradle/libs.versions.toml
+index 90eef9b..c8ac641 100644
+--- a/gradle/libs.versions.toml
++++ b/gradle/libs.versions.toml
+@@ -1,6 +1,6 @@
+ [versions]
+ 
+-teavm = "0.17.0-SNAPSHOT"
++teavm = "0.17.0-dev-7"
+ asm = "9.8"
+ junit-jupiter = "5.11.4"
+ 
