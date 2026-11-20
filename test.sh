@@ -221,4 +221,89 @@ if (stdout !== expectedOut) {
 if (stderr !== expectedErr) {
     throw new Error(`unexpected stderr:\n${JSON.stringify(stderr)}\nexpected:\n${JSON.stringify(expectedErr)}`);
 }
+
+// Verify Java LSP (diagnostics, completion, hover, signatureHelp, definition, references, rename, formatting)
+const ls = compilerMod.exports.createLanguageServer();
+ls.setSdk(compileSdk);
+const lsNotifs = [];
+ls.setNotificationHandler(msg => lsNotifs.push(JSON.parse(msg)));
+let lsId = 1;
+const lsReq = (method, params) => {
+    const res = JSON.parse(ls.handleMessage(JSON.stringify({ jsonrpc: '2.0', id: lsId++, method, params })));
+    if (res.error) throw new Error(`LSP ${method} error: ${JSON.stringify(res.error)}`);
+    return res.result;
+};
+const lsNotify = (method, params) => ls.handleMessage(JSON.stringify({ jsonrpc: '2.0', method, params }));
+
+const initRes = lsReq('initialize', { processId: null, rootUri: 'file:///workdir', capabilities: {} });
+if (!initRes?.capabilities?.completionProvider || !initRes?.capabilities?.documentFormattingProvider) {
+    throw new Error('unexpected LSP capabilities: ' + JSON.stringify(initRes));
+}
+lsNotify('initialized', {});
+const helperUri = 'file:///workdir/Helper.java';
+const mainUri = 'file:///workdir/Main.java';
+lsNotify('textDocument/didOpen', {
+    textDocument: {
+        uri: helperUri, languageId: 'java', version: 1,
+        text: 'public class Helper {\n    public static int computeSum(int a, int b) {\n        return a + b;\n    }\n}\n'
+    }
+});
+const goodMain = 'import java.util.*;\npublic class Main {\n    public static void main(String[] args) {\n        ArrayList<String> list = new ArrayList<>();\n        list.add("hi");\n        String s = list.get(0);\n        int t = Helper.computeSum(1, 2);\n        System.out.println(s + t);\n    }\n}\n';
+lsNotify('textDocument/didOpen', {
+    textDocument: { uri: mainUri, languageId: 'java', version: 1, text: 'public class Main { public static void main(String[] a) { int x = "bad"; } }\n' }
+});
+const errNotif = lsNotifs.findLast(n => n.params?.uri === mainUri);
+if (!errNotif?.params?.diagnostics?.length) {
+    throw new Error('expected javac diagnostic on type error');
+}
+lsNotify('textDocument/didChange', { textDocument: { uri: mainUri, version: 2 }, contentChanges: [{ text: goodMain }] });
+const hover = lsReq('textDocument/hover', { textDocument: { uri: mainUri }, position: { line: 5, character: 25 } });
+if (!hover?.contents?.value?.includes('get(int index)')) {
+    throw new Error('unexpected hover: ' + JSON.stringify(hover));
+}
+const def = lsReq('textDocument/definition', { textDocument: { uri: mainUri }, position: { line: 6, character: 26 } });
+if (def?.uri !== helperUri) {
+    throw new Error('unexpected definition: ' + JSON.stringify(def));
+}
+const refs = lsReq('textDocument/references', {
+    textDocument: { uri: mainUri }, position: { line: 6, character: 26 }, context: { includeDeclaration: true }
+});
+if (refs?.length !== 2) {
+    throw new Error('unexpected references: ' + JSON.stringify(refs));
+}
+const rename = lsReq('textDocument/rename', {
+    textDocument: { uri: mainUri }, position: { line: 6, character: 26 }, newName: 'addNums'
+});
+if (!rename?.changes?.[helperUri] || !rename?.changes?.[mainUri]) {
+    throw new Error('unexpected rename: ' + JSON.stringify(rename));
+}
+lsNotify('textDocument/didChange', {
+    textDocument: { uri: mainUri, version: 3 },
+    contentChanges: [{ text: goodMain.replace('list.add("hi");', 'list.') }]
+});
+const comp = lsReq('textDocument/completion', { textDocument: { uri: mainUri }, position: { line: 4, character: 13 } });
+if (!comp?.items?.some(i => i.label === 'subList' && i.detail?.includes('fromIndex'))) {
+    throw new Error('expected subList(fromIndex, toIndex) completion');
+}
+if (comp.items.some(i => i.label === 'modCount')) {
+    throw new Error('protected field modCount should not appear in completion');
+}
+lsNotify('textDocument/didChange', {
+    textDocument: { uri: mainUri, version: 4 },
+    contentChanges: [{ text: goodMain.replace('list.add("hi");', 'list.subList(0, ') }]
+});
+const sig = lsReq('textDocument/signatureHelp', { textDocument: { uri: mainUri }, position: { line: 4, character: 24 } });
+if (sig?.activeParameter !== 1 || sig?.signatures?.length !== 1) {
+    throw new Error('unexpected signatureHelp: ' + JSON.stringify(sig));
+}
+lsNotify('textDocument/didChange', {
+    textDocument: { uri: mainUri, version: 5 },
+    contentChanges: [{ text: 'public class Main{public static void main(String[] args){int x=1+2;}}\n' }]
+});
+const fmt = lsReq('textDocument/formatting', { textDocument: { uri: mainUri }, options: { tabSize: 4, insertSpaces: true } });
+if (!fmt?.[0]?.newText?.includes('    public static void main(String[] args) {\n        int x = 1 + 2;')) {
+    throw new Error('unexpected formatting: ' + JSON.stringify(fmt));
+}
+lsReq('shutdown', null);
+lsNotify('exit', null);
 EOF
