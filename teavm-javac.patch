@@ -1,5 +1,5 @@
 diff --git a/compiler/build.gradle b/compiler/build.gradle
-index e32d5a7..3d4004f 100644
+index e32d5a7..9c77692 100644
 --- a/compiler/build.gradle
 +++ b/compiler/build.gradle
 @@ -16,6 +16,11 @@ configurations {
@@ -14,7 +14,12 @@ index e32d5a7..3d4004f 100644
  dependencies {
      implementation project(":javac")
      implementation project(":worker")
-@@ -27,6 +32,8 @@ dependencies {
+@@ -23,10 +28,13 @@ dependencies {
+     implementation libs.teavm.tooling
+     implementation libs.teavm.bootstrap.compiler
+     implementation libs.asm.core
++    implementation libs.google.java.format
+     classlibInput libs.teavm.classlib
      classlibInput libs.teavm.jso
      classlibInput libs.teavm.jso.apis
      bootstrapCompiler libs.teavm.bootstrap.compiler
@@ -23,7 +28,7 @@ index e32d5a7..3d4004f 100644
  
      testImplementation libs.teavm.browser.runner
      testImplementation libs.jackson.databind
-@@ -34,11 +41,6 @@ dependencies {
+@@ -34,15 +42,14 @@ dependencies {
      testRuntimeOnly libs.junit.platform.launcher
  }
  
@@ -35,7 +40,15 @@ index e32d5a7..3d4004f 100644
  compileJava {
      options.compilerArgs.addAll("--limit-modules", "java.base")
  }
-@@ -76,24 +78,25 @@ tasks.register("generateClassLib", JavaExec) {
+ 
++compileClasslibEmuJava {
++    options.compilerArgs.add("-parameters")
++}
++
+ teavm {
+     all {
+         mainClass = "org.teavm.javac.CompilerLib"
+@@ -76,24 +83,25 @@ tasks.register("generateClassLib", JavaExec) {
      mainClass = "org.teavm.javac.StdlibConverter"
  }
  
@@ -984,6 +997,333 @@ index 0000000..9953a2e
 +        }
 +    }
 +}
+diff --git a/compiler/src/main/java/org/teavm/javac/CompilerLib.java b/compiler/src/main/java/org/teavm/javac/CompilerLib.java
+index e175ee0..12a1052 100644
+--- a/compiler/src/main/java/org/teavm/javac/CompilerLib.java
++++ b/compiler/src/main/java/org/teavm/javac/CompilerLib.java
+@@ -16,6 +16,7 @@
+ 
+ package org.teavm.javac;
+ 
++import org.teavm.javac.lsp.LanguageServer;
+ import org.teavm.jso.JSExport;
+ 
+ public class CompilerLib {
+@@ -24,6 +25,11 @@ public class CompilerLib {
+         return new Compiler();
+     }
+ 
++    @JSExport
++    public static LanguageServer createLanguageServer() {
++        return new LanguageServer();
++    }
++
+     @JSExport
+     public static void installWorker() {
+         new Worker(new Compiler());
+diff --git a/compiler/src/main/java/org/teavm/javac/FileData.java b/compiler/src/main/java/org/teavm/javac/FileData.java
+index 0c4ba7b..ecfe5c0 100644
+--- a/compiler/src/main/java/org/teavm/javac/FileData.java
++++ b/compiler/src/main/java/org/teavm/javac/FileData.java
+@@ -34,13 +34,13 @@ import javax.lang.model.element.Modifier;
+ import javax.lang.model.element.NestingKind;
+ import javax.tools.JavaFileObject;
+ 
+-class FileData implements JavaFileObject {
++public class FileData implements JavaFileObject {
+     private final Map<String, ?> containingMap;
+     static Map<String, Kind> kindByExtension = new HashMap<>();
+-    String path;
+-    byte[] data = new byte[0];
+-    long lastModified;
+-    boolean isJavaBase;
++    public String path;
++    public byte[] data = new byte[0];
++    public long lastModified;
++    public boolean isJavaBase;
+ 
+     static {
+         for (var kind : Kind.values()) {
+@@ -50,7 +50,7 @@ class FileData implements JavaFileObject {
+         }
+     }
+ 
+-    FileData(Map<String, ?> containingMap) {
++    public FileData(Map<String, ?> containingMap) {
+         this.containingMap = containingMap;
+     }
+ 
+diff --git a/compiler/src/main/java/org/teavm/javac/FileManagerImpl.java b/compiler/src/main/java/org/teavm/javac/FileManagerImpl.java
+index d6b5038..3c963fc 100644
+--- a/compiler/src/main/java/org/teavm/javac/FileManagerImpl.java
++++ b/compiler/src/main/java/org/teavm/javac/FileManagerImpl.java
+@@ -28,11 +28,11 @@ import javax.tools.JavaFileManager;
+ import javax.tools.JavaFileObject;
+ import javax.tools.StandardLocation;
+ 
+-class FileManagerImpl implements JavaFileManager {
++public class FileManagerImpl implements JavaFileManager {
+     private final Map<Location, Map<String, FileData>> locations = new HashMap<>();
+ 
+-    FileManagerImpl(Map<String, FileData> sourcePath, Map<String, FileData> classPath, Map<String, FileData> sdkPath,
+-            Map<String, FileData> outputFiles) {
++    public FileManagerImpl(Map<String, FileData> sourcePath, Map<String, FileData> classPath,
++            Map<String, FileData> sdkPath, Map<String, FileData> outputFiles) {
+         locations.put(StandardLocation.SOURCE_PATH, sourcePath);
+         locations.put(StandardLocation.CLASS_PATH, classPath);
+         locations.put(StandardLocation.CLASS_OUTPUT, outputFiles);
+diff --git a/compiler/src/main/java/org/teavm/javac/GjfCompat.java b/compiler/src/main/java/org/teavm/javac/GjfCompat.java
+new file mode 100644
+index 0000000..a9bdafb
+--- /dev/null
++++ b/compiler/src/main/java/org/teavm/javac/GjfCompat.java
+@@ -0,0 +1,96 @@
++package org.teavm.javac;
++
++import com.google.common.base.Predicate;
++import com.sun.source.tree.CompilationUnitTree;
++import com.sun.source.tree.Tree;
++import com.sun.source.util.TreePath;
++import com.sun.tools.javac.parser.ParserFactory;
++import com.sun.tools.javac.tree.JCTree;
++import com.sun.tools.javac.util.Context;
++import com.sun.tools.javac.util.Log;
++import com.sun.tools.javac.util.Options;
++import java.io.IOException;
++import java.io.UncheckedIOException;
++import java.net.URI;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Map;
++import java.util.stream.Stream;
++import javax.tools.Diagnostic;
++import javax.tools.DiagnosticListener;
++import javax.tools.JavaFileManager;
++import javax.tools.JavaFileObject;
++import javax.tools.SimpleJavaFileObject;
++
++public final class GjfCompat {
++    private GjfCompat() {
++    }
++
++    public static int getEndPosition(Tree tree, CompilationUnitTree unit) {
++        return ((JCTree) tree).getEndPosition(((JCTree.JCCompilationUnit) unit).endPositions);
++    }
++
++    public static String getSourceForNode(Tree node, TreePath path) {
++        CharSequence source;
++        try {
++            source = path.getCompilationUnit().getSourceFile().getCharContent(false);
++        } catch (IOException e) {
++            throw new UncheckedIOException(e);
++        }
++        int start = ((JCTree) node).getStartPosition();
++        int end = getEndPosition(node, path.getCompilationUnit());
++        return source.subSequence(start, end).toString();
++    }
++
++    public static JCTree.JCCompilationUnit parse(
++            Context context,
++            List<Diagnostic<? extends JavaFileObject>> errorDiagnostics,
++            boolean allowStringFolding,
++            String javaInput) {
++        DiagnosticListener<JavaFileObject> diagnostics = diagnostic -> {
++            if (diagnostic.getKind() == Diagnostic.Kind.ERROR
++                    && !diagnostic.getCode().equals("compiler.err.invalid.yield")) {
++                errorDiagnostics.add(diagnostic);
++            }
++        };
++        context.put(DiagnosticListener.class, diagnostics);
++        Options.instance(context).put("--enable-preview", "true");
++        Options.instance(context).put("allowStringFolding", Boolean.toString(allowStringFolding));
++        context.put(JavaFileManager.class, new FileManagerImpl(Map.of(), Map.of(), Map.of(), Map.of()));
++        SimpleJavaFileObject source = new SimpleJavaFileObject(URI.create("source"), JavaFileObject.Kind.SOURCE) {
++            @Override
++            public CharSequence getCharContent(boolean ignoreEncodingErrors) {
++                return javaInput;
++            }
++        };
++        Log.instance(context).useSource(source);
++        var parser = ParserFactory.instance(context).newParser(javaInput, true, true, true);
++        var unit = parser.parseCompilationUnit();
++        unit.sourcefile = source;
++        return unit;
++    }
++
++    public static JavaFileManager emptyFileManager() {
++        return new FileManagerImpl(Map.of(), Map.of(), Map.of(), Map.of());
++    }
++
++    public static Log.DeferredDiagnosticHandler deferredDiagnosticHandler(Log log) {
++        return log.new DeferredDiagnosticHandler();
++    }
++
++    public static Object getDiagnostics(Object handler) {
++        return ((Log.DeferredDiagnosticHandler) handler).getDiagnostics();
++    }
++
++    public static <T> Stream<Long> indexes(Stream<T> stream, Predicate<T> predicate) {
++        var result = new ArrayList<Long>();
++        long[] idx = { 0L };
++        stream.forEach(item -> {
++            if (predicate.apply(item)) {
++                result.add(idx[0]);
++            }
++            idx[0]++;
++        });
++        return result.stream();
++    }
++}
+diff --git a/compiler/src/main/java/org/teavm/javac/Patches.java b/compiler/src/main/java/org/teavm/javac/Patches.java
+index 4d571d2..93e46fe 100644
+--- a/compiler/src/main/java/org/teavm/javac/Patches.java
++++ b/compiler/src/main/java/org/teavm/javac/Patches.java
+@@ -23,9 +23,13 @@ import org.teavm.model.ClassHolderTransformer;
+ import org.teavm.model.ClassHolderTransformerContext;
+ import org.teavm.model.MethodDescriptor;
+ import org.teavm.model.MethodHolder;
++import org.teavm.model.MethodReference;
+ import org.teavm.model.ValueType;
+ import org.teavm.model.emit.ProgramEmitter;
++import org.teavm.model.instructions.ConstructInstruction;
++import org.teavm.model.instructions.InvocationType;
+ import org.teavm.model.instructions.InvokeInstruction;
++import org.teavm.model.instructions.NullCheckInstruction;
+ import org.teavm.vm.spi.TeaVMHost;
+ import org.teavm.vm.spi.TeaVMPlugin;
+ 
+@@ -53,6 +57,15 @@ public class Patches implements TeaVMPlugin, ClassHolderTransformer {
+             case "com.sun.tools.javac.comp.Modules":
+                 transformModules(cls, context);
+                 break;
++            case "com.google.googlejavaformat.java.Trees":
++                transformGjfTrees(cls, context);
++                break;
++            case "com.google.googlejavaformat.java.JavaInputAstVisitor":
++                transformGjfAstVisitor(cls, context);
++                break;
++            case "com.google.googlejavaformat.java.JavaInput":
++                transformGjfJavaInput(cls, context);
++                break;
+         }
+     }
+ 
+@@ -109,4 +122,115 @@ public class Patches implements TeaVMPlugin, ClassHolderTransformer {
+         var pe = ProgramEmitter.create(method, context.getHierarchy());
+         pe.var(1, Stream.class).returnValue();
+     }
++
++    private void transformGjfTrees(ClassHolder cls, ClassHolderTransformerContext context) {
++        var clinit = cls.getMethod(new MethodDescriptor("<clinit>", ValueType.VOID));
++        if (clinit != null) {
++            ProgramEmitter.create(clinit, context.getHierarchy()).exit();
++        }
++
++        var treeType = ValueType.object("com.sun.source.tree.Tree");
++        var cuTreeType = ValueType.object("com.sun.source.tree.CompilationUnitTree");
++        var treePathType = ValueType.object("com.sun.source.util.TreePath");
++        var contextType = ValueType.object("com.sun.tools.javac.util.Context");
++        var jcCuType = ValueType.object("com.sun.tools.javac.tree.JCTree$JCCompilationUnit");
++        var listType = ValueType.object("java.util.List");
++        var stringType = ValueType.object("java.lang.String");
++
++        var getEndPos = cls.getMethod(new MethodDescriptor("getEndPosition",
++                treeType, cuTreeType, ValueType.INTEGER));
++        if (getEndPos != null) {
++            var pe = ProgramEmitter.create(getEndPos, context.getHierarchy());
++            pe.invoke("org.teavm.javac.GjfCompat", "getEndPosition", ValueType.INTEGER,
++                    pe.var(1, treeType), pe.var(2, cuTreeType)).returnValue();
++        }
++
++        var getSource = cls.getMethod(new MethodDescriptor("getSourceForNode",
++                treeType, treePathType, stringType));
++        if (getSource != null) {
++            var pe = ProgramEmitter.create(getSource, context.getHierarchy());
++            pe.invoke("org.teavm.javac.GjfCompat", "getSourceForNode", stringType,
++                    pe.var(1, treeType), pe.var(2, treePathType)).returnValue();
++        }
++
++        var parse = cls.getMethod(new MethodDescriptor("parse",
++                contextType, listType, ValueType.BOOLEAN, stringType, jcCuType));
++        if (parse != null) {
++            var pe = ProgramEmitter.create(parse, context.getHierarchy());
++            pe.invoke("org.teavm.javac.GjfCompat", "parse", jcCuType,
++                    pe.var(1, contextType), pe.var(2, listType),
++                    pe.var(3, ValueType.BOOLEAN), pe.var(4, stringType)).returnValue();
++        }
++    }
++
++    private void transformGjfAstVisitor(ClassHolder cls, ClassHolderTransformerContext context) {
++        var streamType = ValueType.object("java.util.stream.Stream");
++        var predType = ValueType.object("com.google.common.base.Predicate");
++        var indexes = cls.getMethod(new MethodDescriptor("indexes", streamType, predType, streamType));
++        if (indexes != null) {
++            var pe = ProgramEmitter.create(indexes, context.getHierarchy());
++            pe.invoke("org.teavm.javac.GjfCompat", "indexes", streamType,
++                    pe.var(1, streamType), pe.var(2, predType)).returnValue();
++        }
++    }
++
++    private void transformGjfJavaInput(ClassHolder cls, ClassHolderTransformerContext context) {
++        var clinit = cls.getMethod(new MethodDescriptor("<clinit>", ValueType.VOID));
++        if (clinit != null) {
++            ProgramEmitter.create(clinit, context.getHierarchy()).exit();
++        }
++
++        var logType = ValueType.object("com.sun.tools.javac.util.Log");
++        var ddhType = ValueType.object("com.sun.tools.javac.util.Log$DeferredDiagnosticHandler");
++        var ddh = cls.getMethod(new MethodDescriptor("deferredDiagnosticHandler", logType, ddhType));
++        if (ddh != null) {
++            var pe = ProgramEmitter.create(ddh, context.getHierarchy());
++            pe.invoke("org.teavm.javac.GjfCompat", "deferredDiagnosticHandler", ddhType,
++                    pe.var(1, logType)).returnValue();
++        }
++
++        var buildToks = cls.getMethod(new MethodDescriptor("buildToks",
++                ValueType.object("java.lang.String"),
++                ValueType.object("com.google.common.collect.ImmutableSet"),
++                ValueType.object("com.google.common.collect.ImmutableList")));
++        if (buildToks != null) {
++            for (var block : buildToks.getProgram().getBasicBlocks()) {
++                for (var insn : block) {
++                    if (insn instanceof ConstructInstruction construct
++                            && construct.getType().equals("com.sun.tools.javac.file.JavacFileManager")) {
++                        var invoke = new InvokeInstruction();
++                        invoke.setType(InvocationType.SPECIAL);
++                        invoke.setMethod(new MethodReference(
++                                "org.teavm.javac.GjfCompat",
++                                "emptyFileManager",
++                                ValueType.object("javax.tools.JavaFileManager")));
++                        invoke.setReceiver(construct.getReceiver());
++                        construct.replace(invoke);
++                    } else if (insn instanceof InvokeInstruction invoke
++                            && invoke.getMethod().getClassName().equals("com.sun.tools.javac.file.JavacFileManager")
++                            && invoke.getMethod().getName().equals("<init>")) {
++                        invoke.delete();
++                    } else if (insn instanceof InvokeInstruction invoke
++                            && invoke.getMethod().getClassName().equals("java.lang.reflect.Method")
++                            && invoke.getMethod().getName().equals("invoke")) {
++                        var methodVar = invoke.getInstance();
++                        for (var other : block) {
++                            if (other instanceof NullCheckInstruction nc && nc.getReceiver() == methodVar) {
++                                nc.delete();
++                            }
++                        }
++                        var handlerVar = invoke.getArguments().get(0);
++                        invoke.setType(InvocationType.SPECIAL);
++                        invoke.setInstance(null);
++                        invoke.setMethod(new MethodReference(
++                                "org.teavm.javac.GjfCompat",
++                                "getDiagnostics",
++                                ValueType.object("java.lang.Object"),
++                                ValueType.object("java.lang.Object")));
++                        invoke.setArguments(handlerVar);
++                    }
++                }
++            }
++        }
++    }
+ }
 diff --git a/compiler/src/main/java/org/teavm/javac/RuntimeClasslibOverlay.java b/compiler/src/main/java/org/teavm/javac/RuntimeClasslibOverlay.java
 new file mode 100644
 index 0000000..128f575
@@ -1053,7 +1393,7 @@ index 0000000..128f575
 +    }
 +}
 diff --git a/compiler/src/main/java/org/teavm/javac/StdlibConverter.java b/compiler/src/main/java/org/teavm/javac/StdlibConverter.java
-index 84c6f77..dff1a87 100644
+index 84c6f77..ece4b6b 100644
 --- a/compiler/src/main/java/org/teavm/javac/StdlibConverter.java
 +++ b/compiler/src/main/java/org/teavm/javac/StdlibConverter.java
 @@ -25,6 +25,7 @@ import java.io.UncheckedIOException;
@@ -1064,7 +1404,51 @@ index 84c6f77..dff1a87 100644
  import java.util.LinkedHashSet;
  import java.util.Map;
  import java.util.Set;
-@@ -496,38 +497,42 @@ public class StdlibConverter extends ClassVisitor {
+@@ -56,11 +57,14 @@ public class StdlibConverter extends ClassVisitor {
+     boolean visible;
+     String className;
+     private Map<String, String> methodRenames;
++    private Map<String, String[]> methodParamNames;
+     private Set<String> emittedMethods = new HashSet<>();
+ 
+-    public StdlibConverter(ClassVisitor cv, Map<String, String> methodRenames) {
++    public StdlibConverter(ClassVisitor cv, Map<String, String> methodRenames,
++            Map<String, String[]> methodParamNames) {
+         super(Opcodes.ASM9, cv);
+         this.methodRenames = methodRenames;
++        this.methodParamNames = methodParamNames;
+     }
+ 
+     @Override
+@@ -135,7 +139,8 @@ public class StdlibConverter extends ClassVisitor {
+         if ((access & Opcodes.ACC_PUBLIC) == 0 && ((access & Opcodes.ACC_PROTECTED) == 0)) {
+             return null;
+         }
+-        name = methodRenames.getOrDefault(name + desc, name);
++        String origKey = name + desc;
++        name = methodRenames.getOrDefault(origKey, name);
+         desc = renameMethodDesc(desc);
+         if (!emittedMethods.add(name + desc)) {
+             return null;
+@@ -149,7 +154,16 @@ public class StdlibConverter extends ClassVisitor {
+                 exceptions[i] = rename(exceptions[i]);
+             }
+         }
+-        return new MethodVisitorImpl(super.visitMethod(access, name, desc, signature, exceptions));
++        MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
++        if (mv != null) {
++            String[] paramNames = methodParamNames.get(origKey);
++            if (paramNames != null) {
++                for (String p : paramNames) {
++                    mv.visitParameter(p, 0);
++                }
++            }
++        }
++        return new MethodVisitorImpl(mv);
+     }
+ 
+     @Override
+@@ -496,38 +510,42 @@ public class StdlibConverter extends ClassVisitor {
      }
  
      public static void main(String[] args) throws IOException {
@@ -1134,7 +1518,7 @@ index 84c6f77..dff1a87 100644
              if (!packageNames.isEmpty()) {
                  var writer = new ClassWriter(0);
                  writer.visit(Opcodes.V21, Opcodes.ACC_MODULE, "java.base", null, null, null);
-@@ -541,7 +546,8 @@ public class StdlibConverter extends ClassVisitor {
+@@ -541,15 +559,19 @@ public class StdlibConverter extends ClassVisitor {
          }
      }
  
@@ -1143,8 +1527,12 @@ index 84c6f77..dff1a87 100644
 +            throws IOException {
          ClassReader reader = new ClassReader(input);
          ClassWriter writer = new ClassWriter(0);
-         StdlibConverter converter = new StdlibConverter(writer, collectMethodRenames(reader));
-@@ -549,7 +555,7 @@ public class StdlibConverter extends ClassVisitor {
+-        StdlibConverter converter = new StdlibConverter(writer, collectMethodRenames(reader));
++        var renames = new HashMap<String, String>();
++        var paramNames = new HashMap<String, String[]>();
++        collectMethodMeta(reader, renames, paramNames);
++        StdlibConverter converter = new StdlibConverter(writer, renames, paramNames);
+         reader.accept(converter, ClassReader.SKIP_CODE | ClassReader.SKIP_FRAMES
                  | ClassReader.SKIP_DEBUG);
          if (converter.visible) {
              var outputName = converter.className + ".class";
@@ -1153,8 +1541,3096 @@ index 84c6f77..dff1a87 100644
          }
          if (converter.className != null) {
              var index = converter.className.lastIndexOf('/');
+@@ -559,33 +581,79 @@ public class StdlibConverter extends ClassVisitor {
+         }
+     }
+ 
+-    private static Map<String, String> collectMethodRenames(ClassReader reader) {
+-        var renames = new HashMap<String, String>();
++    private static void collectMethodMeta(ClassReader reader, Map<String, String> renames,
++            Map<String, String[]> paramNamesMap) {
+         reader.accept(new ClassVisitor(Opcodes.ASM9) {
+             @Override
+             public MethodVisitor visitMethod(int access, String name, String desc, String signature,
+                     String[] exceptions) {
+-                if (name.equals("<init>")) {
+-                    return null;
++                Type[] argTypes = Type.getArgumentTypes(desc);
++                String key = name + desc;
++                boolean isStatic = (access & Opcodes.ACC_STATIC) != 0;
++                int[] paramSlots = new int[argTypes.length];
++                int slot = isStatic ? 0 : 1;
++                for (int i = 0; i < argTypes.length; i++) {
++                    paramSlots[i] = slot;
++                    slot += argTypes[i].getSize();
+                 }
++                String[] collected = argTypes.length > 0 ? new String[argTypes.length] : null;
++                int[] paramIdx = { 0 };
+                 return new MethodVisitor(Opcodes.ASM9) {
++                    @Override
++                    public void visitParameter(String paramName, int paramAccess) {
++                        if (collected != null && paramIdx[0] < collected.length && paramName != null) {
++                            collected[paramIdx[0]] = paramName;
++                        }
++                        paramIdx[0]++;
++                    }
++
++                    @Override
++                    public void visitLocalVariable(String lvName, String lvDesc, String lvSig,
++                            org.objectweb.asm.Label start, org.objectweb.asm.Label end, int index) {
++                        if (collected == null || lvName == null || lvName.equals("this")) {
++                            return;
++                        }
++                        for (int i = 0; i < paramSlots.length; i++) {
++                            if (paramSlots[i] == index && collected[i] == null) {
++                                collected[i] = lvName;
++                                break;
++                            }
++                        }
++                    }
++
+                     @Override
+                     public AnnotationVisitor visitAnnotation(String annotationDesc, boolean visible) {
+-                        if (!annotationDesc.equals(RENAME_DESC)) {
++                        if (name.equals("<init>") || !annotationDesc.equals(RENAME_DESC)) {
+                             return null;
+                         }
+                         return new AnnotationVisitor(Opcodes.ASM9) {
+                             @Override
+-                            public void visit(String key, Object value) {
+-                                if (key.equals("value") && !value.equals("<init>") && !value.equals("fakeInit")) {
+-                                    renames.put(name + desc, (String) value);
++                            public void visit(String k, Object value) {
++                                if (k.equals("value") && !value.equals("<init>") && !value.equals("fakeInit")) {
++                                    renames.put(key, (String) value);
+                                 }
+                             }
+                         };
+                     }
++
++                    @Override
++                    public void visitEnd() {
++                        if (collected != null) {
++                            boolean anyFound = false;
++                            for (int i = 0; i < collected.length; i++) {
++                                if (collected[i] != null) {
++                                    anyFound = true;
++                                } else {
++                                    collected[i] = "arg" + i;
++                                }
++                            }
++                            if (anyFound) {
++                                paramNamesMap.put(key, collected);
++                            }
++                        }
++                    }
+                 };
+             }
+-        }, ClassReader.SKIP_CODE | ClassReader.SKIP_FRAMES | ClassReader.SKIP_DEBUG);
+-        return renames;
++        }, ClassReader.SKIP_FRAMES);
+     }
+ }
+diff --git a/compiler/src/main/java/org/teavm/javac/lsp/CompletionProvider.java b/compiler/src/main/java/org/teavm/javac/lsp/CompletionProvider.java
+new file mode 100644
+index 0000000..f281c11
+--- /dev/null
++++ b/compiler/src/main/java/org/teavm/javac/lsp/CompletionProvider.java
+@@ -0,0 +1,576 @@
++package org.teavm.javac.lsp;
++
++import com.sun.source.tree.Scope;
++import com.sun.source.tree.Tree;
++import com.sun.source.util.TreePath;
++import com.sun.tools.javac.code.Flags;
++import com.sun.tools.javac.code.Symbol;
++import com.sun.tools.javac.code.Type;
++import com.sun.tools.javac.tree.JCTree;
++import java.util.ArrayList;
++import java.util.LinkedHashSet;
++import java.util.List;
++import java.util.Locale;
++import java.util.Map;
++import java.util.Set;
++import javax.lang.model.element.Element;
++
++final class CompletionProvider {
++    // LSP CompletionItemKind constants
++    private static final int KIND_METHOD = 2;
++    private static final int KIND_FIELD = 5;
++    private static final int KIND_VARIABLE = 6;
++    private static final int KIND_CLASS = 7;
++    private static final int KIND_INTERFACE = 8;
++    private static final int KIND_MODULE = 9;
++    private static final int KIND_ENUM = 13;
++    private static final int KIND_KEYWORD = 14;
++
++    private static final List<String> KEYWORDS = List.of(
++            "abstract", "boolean", "break", "byte", "case", "catch", "char", "class", "continue",
++            "default", "do", "double", "else", "enum", "extends", "false", "final", "finally",
++            "float", "for", "if", "implements", "import", "instanceof", "int", "interface", "long",
++            "new", "null", "package", "private", "protected", "public", "record", "return", "sealed",
++            "short", "static", "super", "switch", "synchronized", "this", "throw", "throws", "true",
++            "try", "var", "void", "while", "yield");
++
++    private CompletionProvider() {
++    }
++
++    static Map<String, Object> complete(
++            JavacAnalyzer analyzer,
++            SdkIndex sdkIndex,
++            Map<String, SourceDoc> docs,
++            SourceDoc doc,
++            int line,
++            int character) {
++        int offset = doc.offsetAt(line, character);
++
++        // 1. Check import line completion first (instant, no javac needed)
++        List<Object> importItems = tryImportCompletion(sdkIndex, docs, doc, offset);
++        if (importItems != null) {
++            return Json.obj("isIncomplete", false, "items", importItems);
++        }
++
++        // 2. Patch buffer and run javac attribution
++        var patched = JavacAnalyzer.patchForCompletion(doc.text, offset);
++        var analysis = analyzer.analyzeWithOverride(docs, doc.uri, patched.text, false);
++        var unit = analysis.unitsByUri.get(doc.uri);
++        if (unit == null) {
++            return Json.obj("isIncomplete", false, "items", List.of());
++        }
++
++        TreePath markerPath = JavacAnalyzer.findMarkerPath(unit, patched.markerOffset);
++        List<Object> items = new ArrayList<>();
++        String prefixLower = patched.prefix.toLowerCase(Locale.ROOT);
++
++        if (patched.isMemberAccess) {
++            JCTree.JCFieldAccess select = findEnclosingFieldAccess(markerPath);
++            if (select != null && select.selected != null) {
++                Symbol.ClassSymbol enclosingClass = findEnclosingClass(markerPath);
++                String unitPkg = unit.packge != null ? unit.packge.getQualifiedName().toString() : "";
++                completeMemberAccess(analysis, select.selected, enclosingClass, unitPkg, prefixLower, items);
++            }
++        } else {
++            completeLexicalScope(analysis, sdkIndex, docs, doc, unit, markerPath, patched.prefix, prefixLower, items);
++        }
++
++        return Json.obj("isIncomplete", false, "items", items);
++    }
++
++    private static List<Object> tryImportCompletion(
++            SdkIndex sdkIndex,
++            Map<String, SourceDoc> docs,
++            SourceDoc doc,
++            int offset) {
++        int lineStart = doc.text.lastIndexOf('\n', Math.max(0, offset - 1)) + 1;
++        String beforeCursor = doc.text.substring(lineStart, Math.min(offset, doc.text.length())).trim();
++        if (!beforeCursor.startsWith("import ")) {
++            return null;
++        }
++        String rest = beforeCursor.substring("import ".length()).trim();
++        if (rest.startsWith("static ")) {
++            rest = rest.substring("static ".length()).trim();
++        }
++        if (rest.startsWith("module ")) {
++            String modPrefix = rest.substring("module ".length()).trim().toLowerCase(Locale.ROOT);
++            List<Object> items = new ArrayList<>();
++            if ("java.base".startsWith(modPrefix)) {
++                items.add(Json.obj("label", "java.base", "kind", KIND_MODULE));
++            }
++            return items;
++        }
++
++        int lastDot = rest.lastIndexOf('.');
++        String pkg = lastDot >= 0 ? rest.substring(0, lastDot) : "";
++        String prefix = (lastDot >= 0 ? rest.substring(lastDot + 1) : rest).toLowerCase(Locale.ROOT);
++
++        List<Object> items = new ArrayList<>();
++        Set<String> seen = new LinkedHashSet<>();
++
++        for (String sub : sdkIndex.getSubPackages(pkg)) {
++            if (sub.toLowerCase(Locale.ROOT).startsWith(prefix) && seen.add("p:" + sub)) {
++                items.add(Json.obj("label", sub, "kind", KIND_MODULE, "detail", "package"));
++            }
++        }
++        for (String cls : sdkIndex.getClassesInPackage(pkg)) {
++            if (cls.toLowerCase(Locale.ROOT).startsWith(prefix) && seen.add("c:" + cls)) {
++                items.add(Json.obj("label", cls, "kind", KIND_CLASS, "detail", pkg + "." + cls));
++            }
++        }
++        return items;
++    }
++
++    private static JCTree.JCFieldAccess findEnclosingFieldAccess(TreePath path) {
++        TreePath cur = path;
++        while (cur != null) {
++            if (cur.getLeaf() instanceof JCTree.JCFieldAccess fa) {
++                return fa;
++            }
++            cur = cur.getParentPath();
++        }
++        return null;
++    }
++
++    private static Symbol.ClassSymbol findEnclosingClass(TreePath path) {
++        TreePath cur = path;
++        while (cur != null) {
++            if (cur.getLeaf() instanceof JCTree.JCClassDecl cd && cd.sym != null) {
++                return cd.sym;
++            }
++            cur = cur.getParentPath();
++        }
++        return null;
++    }
++
++    private static boolean isAccessible(
++            JavacAnalyzer.AnalysisResult analysis,
++            Symbol sym,
++            Symbol.ClassSymbol enclosingClass,
++            String unitPkg) {
++        long flags = sym.flags();
++        if ((flags & Flags.PUBLIC) != 0) {
++            return true;
++        }
++        if ((flags & Flags.PRIVATE) != 0) {
++            return enclosingClass != null && sym.outermostClass() == enclosingClass.outermostClass();
++        }
++        String symPkg = sym.packge() != null ? sym.packge().getQualifiedName().toString() : "";
++        if (symPkg.equals(unitPkg)) {
++            return true;
++        }
++        if ((flags & Flags.PROTECTED) != 0
++                && enclosingClass != null
++                && sym.owner instanceof Symbol.ClassSymbol owner) {
++            try {
++                return analysis.types.isSubtype(enclosingClass.type, owner.type);
++            } catch (Throwable ignored) {
++                return false;
++            }
++        }
++        return false;
++    }
++
++    private static void completeMemberAccess(
++            JavacAnalyzer.AnalysisResult analysis,
++            JCTree.JCExpression selected,
++            Symbol.ClassSymbol enclosingClass,
++            String unitPkg,
++            String prefixLower,
++            List<Object> items) {
++        Type receiverType = selected.type;
++        if (receiverType == null || receiverType.isErroneous()) {
++            // Try package-qualified access (e.g., java.util.<cursor>)
++            Symbol sym = TreeLocator.symbolOfTree(selected);
++            if (sym instanceof Symbol.PackageSymbol ps) {
++                completePackageMembers(ps, prefixLower, items);
++            }
++            return;
++        }
++
++        if (receiverType instanceof Type.ArrayType) {
++            if ("length".startsWith(prefixLower)) {
++                items.add(Json.obj("label", "length", "kind", KIND_FIELD, "detail", "int", "sortText", "0_length"));
++            }
++            collectClassMembers(analysis, analysis.syms.objectType, analysis.syms.objectType, false, enclosingClass,
++                    unitPkg, prefixLower, new LinkedHashSet<>(), items, true);
++            return;
++        }
++
++        if (receiverType instanceof Type.TypeVar tv) {
++            receiverType = tv.getUpperBound();
++        }
++        if (receiverType == null || receiverType.isErroneous() || !(receiverType.tsym instanceof Symbol.ClassSymbol)) {
++            return;
++        }
++
++        boolean staticOnly = isStaticTypeAccess(selected);
++        Set<String> seen = new LinkedHashSet<>();
++        collectClassMembers(analysis, receiverType, receiverType, staticOnly, enclosingClass, unitPkg, prefixLower,
++                seen, items, false);
++        if (staticOnly && "class".startsWith(prefixLower)) {
++            items.add(Json.obj("label", "class", "kind", KIND_KEYWORD, "detail", "Class", "sortText", "2_class"));
++        }
++    }
++
++    private static void completePackageMembers(
++            Symbol.PackageSymbol ps,
++            String prefixLower,
++            List<Object> items) {
++        var members = ps.members();
++        if (members == null) {
++            return;
++        }
++        Set<String> seen = new LinkedHashSet<>();
++        for (Symbol sym : members.getSymbols()) {
++            String name = sym.name.toString();
++            if (name.isEmpty() || name.contains("$") || !name.toLowerCase(Locale.ROOT).startsWith(prefixLower)) {
++                continue;
++            }
++            if (!seen.add(name)) {
++                continue;
++            }
++            if (sym instanceof Symbol.ClassSymbol cs) {
++                items.add(Json.obj("label", name, "kind", classKind(cs), "detail", cs.getQualifiedName().toString()));
++            } else if (sym instanceof Symbol.PackageSymbol) {
++                items.add(Json.obj("label", name, "kind", KIND_MODULE, "detail", "package"));
++            }
++        }
++    }
++
++    private static void collectClassMembers(
++            JavacAnalyzer.AnalysisResult analysis,
++            Type rootReceiver,
++            Type currentType,
++            boolean staticOnly,
++            Symbol.ClassSymbol enclosingClass,
++            String unitPkg,
++            String prefixLower,
++            Set<String> seen,
++            List<Object> items,
++            boolean isObjectClass) {
++        if (currentType == null || currentType.isErroneous() || !(currentType.tsym instanceof Symbol.ClassSymbol cs)) {
++            return;
++        }
++        boolean isObj = isObjectClass || cs.getQualifiedName().contentEquals("java.lang.Object");
++        var members = cs.members();
++        if (members != null) {
++            for (Symbol sym : members.getSymbols()) {
++                long flags = sym.flags();
++                if ((flags & (Flags.SYNTHETIC | Flags.BRIDGE)) != 0) {
++                    continue;
++                }
++                if (!isAccessible(analysis, sym, enclosingClass, unitPkg)) {
++                    continue;
++                }
++                String name = sym.name.toString();
++                if (name.isEmpty() || name.startsWith("<") || name.contains("$")) {
++                    continue;
++                }
++                if (!matchesPrefix(name, prefixLower)) {
++                    continue;
++                }
++                boolean isStatic = (flags & Flags.STATIC) != 0;
++                if (staticOnly && !isStatic && !(sym instanceof Symbol.ClassSymbol)) {
++                    continue;
++                }
++                if (!staticOnly && isStatic) {
++                    continue;
++                }
++
++                String sortPrefix = isObj ? "2_" : "0_";
++                if (sym instanceof Symbol.MethodSymbol ms) {
++                    Type mt = TypeFormatter.resolveMemberType(analysis.types, rootReceiver, ms);
++                    String params = TypeFormatter.formatMethodParams(ms, mt);
++                    String ret = TypeFormatter.formatMethodReturnType(ms, mt);
++                    String dedupKey = "m:" + name + "(" + TypeFormatter.formatMethodParamTypesKey(ms, mt) + ")";
++                    if (!seen.add(dedupKey)) {
++                        continue;
++                    }
++                    String detail = ret + " " + name + "(" + params + ")";
++                    String insertText = (ms.params() == null || ms.params().isEmpty()) ? name + "()" : name;
++                    items.add(Json.obj(
++                            "label", name,
++                            "kind", KIND_METHOD,
++                            "detail", detail,
++                            "insertText", insertText,
++                            "sortText", sortPrefix + name));
++                } else if (sym instanceof Symbol.VarSymbol vs) {
++                    if (!seen.add("f:" + name)) {
++                        continue;
++                    }
++                    Type vt = TypeFormatter.resolveMemberType(analysis.types, rootReceiver, vs);
++                    items.add(Json.obj(
++                            "label", name,
++                            "kind", KIND_FIELD,
++                            "detail", TypeFormatter.shortType(vt),
++                            "sortText", sortPrefix + name));
++                } else if (sym instanceof Symbol.ClassSymbol nested && staticOnly) {
++                    if (!seen.add("c:" + name)) {
++                        continue;
++                    }
++                    items.add(Json.obj(
++                            "label", name,
++                            "kind", classKind(nested),
++                            "detail", nested.getQualifiedName().toString(),
++                            "sortText", "1_" + name));
++                }
++            }
++        }
++
++        if (!isObj) {
++            Type sup = analysis.types.supertype(currentType);
++            if (sup != null && sup != Type.noType && sup != currentType) {
++                collectClassMembers(analysis, rootReceiver, sup, staticOnly, enclosingClass, unitPkg, prefixLower,
++                        seen, items, false);
++            }
++            for (Type iface : analysis.types.interfaces(currentType)) {
++                collectClassMembers(analysis, rootReceiver, iface, staticOnly, enclosingClass, unitPkg, prefixLower,
++                        seen, items, false);
++            }
++        }
++    }
++
++    private static void completeLexicalScope(
++            JavacAnalyzer.AnalysisResult analysis,
++            SdkIndex sdkIndex,
++            Map<String, SourceDoc> docs,
++            SourceDoc doc,
++            JCTree.JCCompilationUnit unit,
++            TreePath path,
++            String prefix,
++            String prefixLower,
++            List<Object> items) {
++        Set<String> seen = new LinkedHashSet<>();
++
++        // 1. Walk javac Scope for locals, parameters, fields, methods
++        if (path != null) {
++            try {
++                Scope scope = analysis.trees.getScope(path);
++                while (scope != null) {
++                    for (Element el : scope.getLocalElements()) {
++                        addElementIfMatching(analysis, el, prefixLower, seen, items, "0_");
++                    }
++                    if (scope.getEnclosingClass() instanceof Symbol.ClassSymbol enclosing) {
++                        String unitPkg = unit.packge != null ? unit.packge.getQualifiedName().toString() : "";
++                        boolean inStatic = isInsideStaticContext(path);
++                        collectClassMembers(analysis, enclosing.type, enclosing.type, inStatic, enclosing, unitPkg,
++                                prefixLower, seen, items, false);
++                        if (!inStatic) {
++                            // Also expose static members of enclosing class in instance methods
++                            collectClassMembers(analysis, enclosing.type, enclosing.type, true, enclosing, unitPkg,
++                                    prefixLower, seen, items, false);
++                        }
++                    }
++                    scope = scope.getEnclosingScope();
++                }
++            } catch (Throwable ignored) {
++                // Scope lookup may fail on heavily broken ASTs; continue with imports/SDK/keywords.
++            }
++        }
++
++        // 2. Workspace classes
++        for (var otherUnit : analysis.unitsByUri.values()) {
++            if (otherUnit == null) {
++                continue;
++            }
++            for (JCTree def : otherUnit.defs) {
++                if (def instanceof JCTree.JCClassDecl cd) {
++                    String name = cd.name.toString();
++                    if (!name.isEmpty() && matchesPrefix(name, prefixLower) && seen.add("c:" + name)) {
++                        items.add(Json.obj(
++                                "label", name,
++                                "kind", cd.sym != null ? classKind(cd.sym) : KIND_CLASS,
++                                "detail", cd.sym != null ? cd.sym.getQualifiedName().toString() : name,
++                                "sortText", "1_" + name));
++                    }
++                }
++            }
++        }
++
++        // 3. Imported classes + java.lang.*
++        Set<String> importedSimple = new LinkedHashSet<>();
++        Set<String> wildcardPkgs = new LinkedHashSet<>();
++        wildcardPkgs.add("java.lang");
++        for (var impBase : unit.getImports()) {
++            if (impBase instanceof JCTree.JCModuleImport) {
++                wildcardPkgs.addAll(sdkIndex.classesInPackage.keySet());
++                continue;
++            }
++            if (!(impBase instanceof JCTree.JCImport imp) || imp.isStatic()) {
++                continue;
++            }
++            String q = imp.qualid.toString();
++            if (q.endsWith(".*")) {
++                wildcardPkgs.add(q.substring(0, q.length() - 2));
++            } else {
++                int dot = q.lastIndexOf('.');
++                if (dot > 0) {
++                    String simple = q.substring(dot + 1);
++                    importedSimple.add(simple);
++                    if (matchesPrefix(simple, prefixLower) && seen.add("c:" + simple)) {
++                        items.add(Json.obj("label", simple, "kind", KIND_CLASS, "detail", q, "sortText", "1_" + simple));
++                    }
++                }
++            }
++        }
++        for (String pkg : wildcardPkgs) {
++            for (String cls : sdkIndex.getClassesInPackage(pkg)) {
++                importedSimple.add(cls);
++                if (matchesPrefix(cls, prefixLower) && seen.add("c:" + cls)) {
++                    items.add(Json.obj("label", cls, "kind", KIND_CLASS, "detail", pkg + "." + cls, "sortText",
++                            "2_" + cls));
++                }
++            }
++        }
++
++        // 4. Auto-import candidates from SDK when user typed >= 2 chars
++        if (prefix.length() >= 2) {
++            int autoImportLimit = 30;
++            int added = 0;
++            int insertLine = findImportInsertLine(doc, unit);
++            Map<String, Object> insertRange = Json.obj(
++                    "start", Json.obj("line", insertLine, "character", 0),
++                    "end", Json.obj("line", insertLine, "character", 0));
++
++            for (String fqn : sdkIndex.allTopLevelClasses) {
++                int dot = fqn.lastIndexOf('.');
++                if (dot < 0) {
++                    continue;
++                }
++                String pkg = fqn.substring(0, dot);
++                String simple = fqn.substring(dot + 1);
++                if (importedSimple.contains(simple) || wildcardPkgs.contains(pkg)) {
++                    continue;
++                }
++                if (!matchesPrefix(simple, prefixLower) || !seen.add("ai:" + fqn)) {
++                    continue;
++                }
++                items.add(Json.obj(
++                        "label", simple,
++                        "kind", KIND_CLASS,
++                        "detail", fqn + " (auto-import)",
++                        "sortText", "3_" + simple,
++                        "additionalTextEdits", Json.arr(Json.obj(
++                                "range", insertRange,
++                                "newText", "import " + fqn + ";\n"))));
++                if (++added >= autoImportLimit) {
++                    break;
++                }
++            }
++        }
++
++        // 5. Java keywords
++        for (String kw : KEYWORDS) {
++            if (kw.startsWith(prefixLower) && seen.add("k:" + kw)) {
++                items.add(Json.obj("label", kw, "kind", KIND_KEYWORD, "sortText", "4_" + kw));
++            }
++        }
++    }
++
++    private static void addElementIfMatching(
++            JavacAnalyzer.AnalysisResult analysis,
++            Element el,
++            String prefixLower,
++            Set<String> seen,
++            List<Object> items,
++            String sortPrefix) {
++        if (!(el instanceof Symbol sym)) {
++            return;
++        }
++        String name = sym.name.toString();
++        if (name.isEmpty() || name.equals(JavacAnalyzer.COMPLETION_MARKER) || name.startsWith("<")) {
++            return;
++        }
++        if (!matchesPrefix(name, prefixLower)) {
++            return;
++        }
++        if (sym instanceof Symbol.VarSymbol vs) {
++            if (seen.add("v:" + name)) {
++                items.add(Json.obj(
++                        "label", name,
++                        "kind", KIND_VARIABLE,
++                        "detail", TypeFormatter.shortType(vs.type),
++                        "sortText", sortPrefix + name));
++            }
++        } else if (sym instanceof Symbol.MethodSymbol ms) {
++            String params = TypeFormatter.formatMethodParams(ms, ms.type);
++            String ret = TypeFormatter.formatMethodReturnType(ms, ms.type);
++            if (seen.add("m:" + name + "(" + TypeFormatter.formatMethodParamTypesKey(ms, ms.type) + ")")) {
++                items.add(Json.obj(
++                        "label", name,
++                        "kind", KIND_METHOD,
++                        "detail", ret + " " + name + "(" + params + ")",
++                        "sortText", sortPrefix + name));
++            }
++        } else if (sym instanceof Symbol.ClassSymbol cs) {
++            if (seen.add("c:" + name)) {
++                items.add(Json.obj(
++                        "label", name,
++                        "kind", classKind(cs),
++                        "detail", cs.getQualifiedName().toString(),
++                        "sortText", "1_" + name));
++            }
++        }
++    }
++
++    private static int findImportInsertLine(SourceDoc doc, JCTree.JCCompilationUnit unit) {
++        int bestLine = 0;
++        if (unit.getPackage() != null) {
++            int end = TreeLocator.endPos((JCTree) unit.getPackage(), unit);
++            bestLine = doc.positionAt(end)[0] + 1;
++        }
++        for (var imp : unit.getImports()) {
++            int end = TreeLocator.endPos(imp, unit);
++            bestLine = Math.max(bestLine, doc.positionAt(end)[0] + 1);
++        }
++        return bestLine;
++    }
++
++    private static boolean isStaticTypeAccess(JCTree.JCExpression expr) {
++        if (expr instanceof JCTree.JCIdent ident) {
++            return ident.sym instanceof Symbol.ClassSymbol;
++        }
++        if (expr instanceof JCTree.JCFieldAccess fa) {
++            return fa.sym instanceof Symbol.ClassSymbol;
++        }
++        return false;
++    }
++
++    private static boolean isInsideStaticContext(TreePath path) {
++        TreePath cur = path;
++        while (cur != null) {
++            Tree leaf = cur.getLeaf();
++            if (leaf instanceof JCTree.JCMethodDecl md) {
++                return (md.mods.flags & Flags.STATIC) != 0;
++            }
++            if (leaf instanceof JCTree.JCBlock blk && cur.getParentPath() != null
++                    && cur.getParentPath().getLeaf() instanceof JCTree.JCClassDecl) {
++                return (blk.flags & Flags.STATIC) != 0;
++            }
++            if (leaf instanceof JCTree.JCClassDecl) {
++                return false;
++            }
++            cur = cur.getParentPath();
++        }
++        return false;
++    }
++
++    private static int classKind(Symbol.ClassSymbol cs) {
++        long flags = cs.flags();
++        if ((flags & Flags.ENUM) != 0) {
++            return KIND_ENUM;
++        }
++        if ((flags & Flags.INTERFACE) != 0) {
++            return KIND_INTERFACE;
++        }
++        return KIND_CLASS;
++    }
++
++    private static boolean matchesPrefix(String candidate, String prefixLower) {
++        if (prefixLower.isEmpty()) {
++            return true;
++        }
++        return candidate.toLowerCase(Locale.ROOT).startsWith(prefixLower);
++    }
++}
+diff --git a/compiler/src/main/java/org/teavm/javac/lsp/HoverProvider.java b/compiler/src/main/java/org/teavm/javac/lsp/HoverProvider.java
+new file mode 100644
+index 0000000..4f311e3
+--- /dev/null
++++ b/compiler/src/main/java/org/teavm/javac/lsp/HoverProvider.java
+@@ -0,0 +1,153 @@
++package org.teavm.javac.lsp;
++
++import com.sun.source.util.TreePath;
++import com.sun.tools.javac.code.Flags;
++import com.sun.tools.javac.code.Symbol;
++import com.sun.tools.javac.code.Type;
++import com.sun.tools.javac.tree.JCTree;
++import java.util.Map;
++
++final class HoverProvider {
++    private HoverProvider() {
++    }
++
++    static Map<String, Object> hover(
++            JavacAnalyzer.AnalysisResult analysis,
++            SourceDoc doc,
++            int line,
++            int character) {
++        var unit = analysis.unitsByUri.get(doc.uri);
++        if (unit == null) {
++            return null;
++        }
++        int offset = doc.offsetAt(line, character);
++        TreePath path = TreeLocator.findInnermostPath(unit, offset);
++        if (path == null) {
++            return null;
++        }
++        Symbol sym = TreeLocator.resolveSymbol(path);
++        if (sym == null || sym.type == null || sym.type.isErroneous()) {
++            return null;
++        }
++
++        Type receiverType = null;
++        if (path.getLeaf() instanceof JCTree.JCFieldAccess fa && fa.selected != null) {
++            receiverType = fa.selected.type;
++        } else if (path.getParentPath() != null
++                && path.getParentPath().getLeaf() instanceof JCTree.JCFieldAccess fa
++                && fa.selected != null) {
++            receiverType = fa.selected.type;
++        }
++
++        String text = formatHover(analysis, sym, receiverType);
++        if (text == null || text.isEmpty()) {
++            return null;
++        }
++
++        Map<String, Object> range = null;
++        if (path.getLeaf() instanceof JCTree jc) {
++            int s = TreeLocator.startPos(jc);
++            int e = TreeLocator.endPos(jc, unit);
++            if (s >= 0 && e >= s) {
++                range = doc.range(s, e);
++            }
++        }
++
++        var result = Json.obj(
++                "contents", Json.obj("kind", "markdown", "value", "```java\n" + text + "\n```"));
++        if (range != null) {
++            result.put("range", range);
++        }
++        return result;
++    }
++
++    private static String formatHover(JavacAnalyzer.AnalysisResult analysis, Symbol sym, Type receiverType) {
++        if (sym instanceof Symbol.MethodSymbol ms) {
++            Type mt = TypeFormatter.resolveMemberType(analysis.types, receiverType, ms);
++            var sb = new StringBuilder();
++            sb.append(TypeFormatter.formatModifiers(ms));
++            sb.append(TypeFormatter.formatMethodSignature(ms, mt, true));
++            var thrown = ms.getThrownTypes();
++            if (thrown != null && !thrown.isEmpty()) {
++                sb.append(" throws ");
++                for (int i = 0; i < thrown.size(); i++) {
++                    if (i > 0) {
++                        sb.append(", ");
++                    }
++                    sb.append(TypeFormatter.shortType(thrown.get(i)));
++                }
++            }
++            return sb.toString().trim();
++        }
++        if (sym instanceof Symbol.VarSymbol vs) {
++            Type vt = TypeFormatter.resolveMemberType(analysis.types, receiverType, vs);
++            var sb = new StringBuilder();
++            sb.append(TypeFormatter.formatModifiers(vs));
++            sb.append(TypeFormatter.shortType(vt)).append(' ');
++            if (vs.owner instanceof Symbol.ClassSymbol cs && !cs.name.isEmpty()) {
++                sb.append(cs.name).append('.');
++            }
++            sb.append(vs.name);
++            Object constVal = vs.getConstantValue();
++            if (constVal != null) {
++                sb.append(" = ");
++                if (constVal instanceof String str) {
++                    sb.append('"').append(str).append('"');
++                } else {
++                    sb.append(constVal);
++                }
++            }
++            return sb.toString().trim();
++        }
++        if (sym instanceof Symbol.ClassSymbol cs) {
++            var sb = new StringBuilder();
++            sb.append(TypeFormatter.formatModifiers(cs));
++            long flags = cs.flags();
++            if ((flags & Flags.ENUM) != 0) {
++                sb.append("enum ");
++            } else if ((flags & Flags.RECORD) != 0) {
++                sb.append("record ");
++            } else if ((flags & Flags.ANNOTATION) != 0) {
++                sb.append("@interface ");
++            } else if ((flags & Flags.INTERFACE) != 0) {
++                sb.append("interface ");
++            } else {
++                sb.append("class ");
++            }
++            sb.append(cs.getQualifiedName());
++            var tps = cs.getTypeParameters();
++            if (tps != null && !tps.isEmpty()) {
++                sb.append('<');
++                for (int i = 0; i < tps.size(); i++) {
++                    if (i > 0) {
++                        sb.append(", ");
++                    }
++                    sb.append(tps.get(i).name);
++                }
++                sb.append('>');
++            }
++            Type sup = cs.getSuperclass();
++            if (sup != null && sup.tsym != null
++                    && !sup.tsym.getQualifiedName().contentEquals("java.lang.Object")
++                    && !sup.tsym.getQualifiedName().contentEquals("java.lang.Enum")
++                    && !sup.tsym.getQualifiedName().contentEquals("java.lang.Record")) {
++                sb.append(" extends ").append(TypeFormatter.shortType(sup));
++            }
++            var ifaces = cs.getInterfaces();
++            if (ifaces != null && !ifaces.isEmpty()) {
++                sb.append((flags & Flags.INTERFACE) != 0 ? " extends " : " implements ");
++                for (int i = 0; i < ifaces.size(); i++) {
++                    if (i > 0) {
++                        sb.append(", ");
++                    }
++                    sb.append(TypeFormatter.shortType(ifaces.get(i)));
++                }
++            }
++            return sb.toString().trim();
++        }
++        if (sym instanceof Symbol.PackageSymbol ps) {
++            return "package " + ps.getQualifiedName();
++        }
++        return TypeFormatter.shortType(sym.type) + " " + sym.name;
++    }
++}
+diff --git a/compiler/src/main/java/org/teavm/javac/lsp/JavacAnalyzer.java b/compiler/src/main/java/org/teavm/javac/lsp/JavacAnalyzer.java
+new file mode 100644
+index 0000000..2741afb
+--- /dev/null
++++ b/compiler/src/main/java/org/teavm/javac/lsp/JavacAnalyzer.java
+@@ -0,0 +1,289 @@
++package org.teavm.javac.lsp;
++
++import com.sun.source.util.SourcePositions;
++import com.sun.source.util.TreePath;
++import com.sun.tools.javac.api.JavacTrees;
++import com.sun.tools.javac.code.Symtab;
++import com.sun.tools.javac.code.Types;
++import com.sun.tools.javac.comp.AttrContext;
++import com.sun.tools.javac.comp.CompileStates.CompileState;
++import com.sun.tools.javac.comp.Env;
++import com.sun.tools.javac.main.JavaCompiler;
++import com.sun.tools.javac.tree.JCTree;
++import com.sun.tools.javac.util.Context;
++import com.sun.tools.javac.util.Names;
++import com.sun.tools.javac.util.Options;
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.Queue;
++import java.util.Set;
++import javax.tools.Diagnostic;
++import javax.tools.DiagnosticListener;
++import javax.tools.JavaFileManager;
++import javax.tools.JavaFileObject;
++import org.teavm.javac.FileData;
++import org.teavm.javac.FileManagerImpl;
++
++final class JavacAnalyzer {
++    static final String COMPLETION_MARKER = "__teavm_complete__";
++
++    private final Map<String, FileData> sdkFiles;
++
++    JavacAnalyzer(Map<String, FileData> sdkFiles) {
++        this.sdkFiles = sdkFiles;
++    }
++
++    static final class AnalysisResult {
++        final Context context;
++        final JavacTrees trees;
++        final SourcePositions sourcePositions;
++        final Types types;
++        final Symtab syms;
++        final Names names;
++        final Map<String, JCTree.JCCompilationUnit> unitsByUri;
++        final Map<String, List<Diagnostic<? extends JavaFileObject>>> diagnosticsByUri;
++
++        AnalysisResult(
++                Context context,
++                Map<String, JCTree.JCCompilationUnit> unitsByUri,
++                Map<String, List<Diagnostic<? extends JavaFileObject>>> diagnosticsByUri) {
++            this.context = context;
++            this.trees = JavacTrees.instance(context);
++            this.sourcePositions = trees.getSourcePositions();
++            this.types = Types.instance(context);
++            this.syms = Symtab.instance(context);
++            this.names = Names.instance(context);
++            this.unitsByUri = unitsByUri;
++            this.diagnosticsByUri = diagnosticsByUri;
++        }
++    }
++
++    AnalysisResult analyze(Map<String, SourceDoc> docs, boolean runFlow) {
++        return analyzeWithOverride(docs, null, null, runFlow);
++    }
++
++    AnalysisResult analyzeWithOverride(
++            Map<String, SourceDoc> docs,
++            String overrideUri,
++            String overrideText,
++            boolean runFlow) {
++        var sourceFiles = new LinkedHashMap<String, FileData>();
++        var pathToUri = new LinkedHashMap<String, String>();
++        var diagnosticsByUri = new LinkedHashMap<String, List<Diagnostic<? extends JavaFileObject>>>();
++
++        for (var doc : docs.values()) {
++            if (!doc.relPath.endsWith(".java")) {
++                continue;
++            }
++            diagnosticsByUri.put(doc.uri, new ArrayList<>());
++            String content = doc.uri.equals(overrideUri) && overrideText != null ? overrideText : doc.text;
++            var fd = new FileData(sourceFiles);
++            fd.path = doc.relPath;
++            fd.data = content.getBytes(StandardCharsets.UTF_8);
++            fd.lastModified = System.currentTimeMillis();
++            sourceFiles.put(doc.relPath, fd);
++            pathToUri.put(doc.relPath, doc.uri);
++        }
++
++        var context = new Context();
++        Options.instance(context).put("-parameters", "true");
++        Options.instance(context).put("-Xmaxerrs", "100");
++        Options.instance(context).put("-Xmaxwarns", "100");
++        Options.instance(context).put("should-stop.ifError", "ATTR");
++
++        DiagnosticListener<JavaFileObject> listener = diag -> {
++            if (diag.getSource() == null) {
++                return;
++            }
++            String uri = pathToUri.get(diag.getSource().getName());
++            if (uri != null) {
++                diagnosticsByUri.computeIfAbsent(uri, k -> new ArrayList<>()).add(diag);
++            }
++        };
++        context.put(DiagnosticListener.class, listener);
++        var fm = new FileManagerImpl(sourceFiles, new LinkedHashMap<>(), sdkFiles, new LinkedHashMap<>());
++        context.put(JavaFileManager.class, fm);
++
++        var compiler = new LspJavaCompiler(context);
++        compiler.prepare();
++
++        var unitsByUri = new LinkedHashMap<String, JCTree.JCCompilationUnit>();
++        if (!sourceFiles.isEmpty()) {
++            var javaFiles = new ArrayList<JavaFileObject>(sourceFiles.values());
++            var units = compiler.runAnalysis(javaFiles, runFlow);
++            for (var unit : units) {
++                if (unit.sourcefile != null) {
++                    String uri = pathToUri.get(unit.sourcefile.getName());
++                    if (uri != null) {
++                        unitsByUri.put(uri, unit);
++                    }
++                }
++            }
++        }
++        return new AnalysisResult(context, unitsByUri, diagnosticsByUri);
++    }
++
++    static final class PatchedSource {
++        final String text;
++        final int markerOffset;
++        final String prefix;
++        final boolean isMemberAccess;
++
++        PatchedSource(String text, int markerOffset, String prefix, boolean isMemberAccess) {
++            this.text = text;
++            this.markerOffset = markerOffset;
++            this.prefix = prefix;
++            this.isMemberAccess = isMemberAccess;
++        }
++    }
++
++    static PatchedSource patchForCompletion(String text, int cursorOffset) {
++        int clamped = Math.max(0, Math.min(cursorOffset, text.length()));
++        int identStart = clamped;
++        while (identStart > 0 && Character.isJavaIdentifierPart(text.charAt(identStart - 1))) {
++            identStart--;
++        }
++        String prefix = text.substring(identStart, clamped);
++
++        int beforeIdent = identStart;
++        while (beforeIdent > 0 && Character.isWhitespace(text.charAt(beforeIdent - 1))) {
++            beforeIdent--;
++        }
++        boolean isMember = beforeIdent > 0 && text.charAt(beforeIdent - 1) == '.';
++
++        // Avoid patching inside an already valid identifier followed by identifier chars if not needed,
++        // or replace [identStart, clamped] with marker.
++        int replaceEnd = clamped;
++        while (replaceEnd < text.length() && Character.isJavaIdentifierPart(text.charAt(replaceEnd))) {
++            replaceEnd++;
++        }
++
++        // Check if we need a trailing semicolon so javac parses `expr.__teavm_complete__;` cleanly
++        // when the user is mid-statement (e.g. `list.\n}`).
++        int nextNonWs = replaceEnd;
++        while (nextNonWs < text.length()
++                && (text.charAt(nextNonWs) == ' ' || text.charAt(nextNonWs) == '\t')) {
++            nextNonWs++;
++        }
++        boolean needsSemi = false;
++        if (nextNonWs >= text.length()) {
++            needsSemi = true;
++        } else {
++            char nextCh = text.charAt(nextNonWs);
++            if (nextCh == '\n' || nextCh == '\r' || nextCh == '}') {
++                needsSemi = true;
++            }
++        }
++
++        // Don't add ';' inside parentheses like `foo(list.|)` or `if (x.|)`
++        if (needsSemi && isInsideParensOnLine(text, identStart)) {
++            needsSemi = false;
++        }
++
++        char nextCh = nextNonWs < text.length() ? text.charAt(nextNonWs) : '\0';
++        String insertion;
++        if (isMember && nextCh != '(' && nextCh != '.') {
++            insertion = needsSemi ? COMPLETION_MARKER + "();" : COMPLETION_MARKER + "()";
++        } else {
++            insertion = needsSemi ? COMPLETION_MARKER + ";" : COMPLETION_MARKER;
++        }
++        String patched = text.substring(0, identStart) + insertion + text.substring(replaceEnd);
++        return new PatchedSource(patched, identStart, prefix, isMember);
++    }
++
++    private static boolean isInsideParensOnLine(String text, int offset) {
++        int lineStart = text.lastIndexOf('\n', Math.max(0, offset - 1)) + 1;
++        int depth = 0;
++        boolean inStr = false;
++        boolean inChar = false;
++        for (int i = lineStart; i < offset; i++) {
++            char c = text.charAt(i);
++            if (c == '\\' && (inStr || inChar)) {
++                i++;
++                continue;
++            }
++            if (c == '"' && !inChar) {
++                inStr = !inStr;
++            } else if (c == '\'' && !inStr) {
++                inChar = !inChar;
++            } else if (!inStr && !inChar) {
++                if (c == '(') {
++                    depth++;
++                } else if (c == ')' && depth > 0) {
++                    depth--;
++                }
++            }
++        }
++        return depth > 0;
++    }
++
++    static TreePath findMarkerPath(JCTree.JCCompilationUnit unit, int markerOffset) {
++        if (unit != null) {
++            var scanner = new com.sun.source.util.TreePathScanner<TreePath, Void>() {
++                @Override
++                public TreePath visitMemberSelect(com.sun.source.tree.MemberSelectTree node, Void p) {
++                    if (node.getIdentifier().contentEquals(COMPLETION_MARKER)) {
++                        return getCurrentPath();
++                    }
++                    return super.visitMemberSelect(node, p);
++                }
++
++                @Override
++                public TreePath visitIdentifier(com.sun.source.tree.IdentifierTree node, Void p) {
++                    if (node.getName().contentEquals(COMPLETION_MARKER)) {
++                        return getCurrentPath();
++                    }
++                    return super.visitIdentifier(node, p);
++                }
++
++                @Override
++                public TreePath reduce(TreePath r1, TreePath r2) {
++                    return r1 != null ? r1 : r2;
++                }
++            };
++            TreePath found = scanner.scan(unit, null);
++            if (found != null) {
++                return found;
++            }
++        }
++        return TreeLocator.findInnermostPath(unit, markerOffset + 1);
++    }
++
++    private static final class LspJavaCompiler extends JavaCompiler {
++        LspJavaCompiler(Context context) {
++            super(context);
++            this.genEndPos = true;
++            this.shouldStopPolicyIfError = CompileState.ATTR;
++            this.shouldStopPolicyIfNoError = CompileState.FLOW;
++        }
++
++        void prepare() {
++            syms.unnamedModule.visiblePackages = new LinkedHashMap<>();
++            syms.unnamedModule.readModules = Set.of(syms.unnamedModule, syms.java_base);
++            syms.java_base.complete();
++            for (var export : syms.java_base.exports) {
++                syms.unnamedModule.visiblePackages.put(export.packge.fullname, export.packge);
++            }
++        }
++
++        com.sun.tools.javac.util.List<JCTree.JCCompilationUnit> runAnalysis(
++                List<JavaFileObject> files,
++                boolean runFlow) {
++            var units = parseFiles(files);
++            try {
++                units = initModules(units);
++                units = enterTrees(units);
++                Queue<Env<AttrContext>> attributed = attribute(todo);
++                if (runFlow) {
++                    flow(attributed);
++                }
++            } catch (Throwable ignored) {
++                // Best-effort attribution on incomplete/malformed code while user is typing.
++            }
++            return units;
++        }
++    }
++}
+diff --git a/compiler/src/main/java/org/teavm/javac/lsp/Json.java b/compiler/src/main/java/org/teavm/javac/lsp/Json.java
+new file mode 100644
+index 0000000..1d11573
+--- /dev/null
++++ b/compiler/src/main/java/org/teavm/javac/lsp/Json.java
+@@ -0,0 +1,322 @@
++package org.teavm.javac.lsp;
++
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++
++final class Json {
++    private Json() {
++    }
++
++    static Object parse(String text) {
++        if (text == null) {
++            return null;
++        }
++        return new Parser(text).parseRoot();
++    }
++
++    static String stringify(Object value) {
++        var sb = new StringBuilder(256);
++        write(value, sb);
++        return sb.toString();
++    }
++
++    @SuppressWarnings("unchecked")
++    static Map<String, Object> asObj(Object value) {
++        return value instanceof Map<?, ?> ? (Map<String, Object>) value : null;
++    }
++
++    @SuppressWarnings("unchecked")
++    static List<Object> asList(Object value) {
++        return value instanceof List<?> ? (List<Object>) value : null;
++    }
++
++    static String asStr(Object value) {
++        return value instanceof String s ? s : null;
++    }
++
++    static int asInt(Object value, int fallback) {
++        if (value instanceof Number n) {
++            return n.intValue();
++        }
++        return fallback;
++    }
++
++    static boolean asBool(Object value, boolean fallback) {
++        if (value instanceof Boolean b) {
++            return b;
++        }
++        return fallback;
++    }
++
++    static Map<String, Object> obj(Object... kv) {
++        var map = new LinkedHashMap<String, Object>();
++        for (int i = 0; i + 1 < kv.length; i += 2) {
++            map.put((String) kv[i], kv[i + 1]);
++        }
++        return map;
++    }
++
++    static List<Object> arr(Object... items) {
++        var list = new ArrayList<Object>(items.length);
++        for (Object item : items) {
++            list.add(item);
++        }
++        return list;
++    }
++
++    private static void write(Object value, StringBuilder sb) {
++        if (value == null) {
++            sb.append("null");
++        } else if (value instanceof Boolean b) {
++            sb.append(b ? "true" : "false");
++        } else if (value instanceof Integer i) {
++            sb.append(i.intValue());
++        } else if (value instanceof Long l) {
++            sb.append(l.longValue());
++        } else if (value instanceof Number n) {
++            double d = n.doubleValue();
++            if (Double.isFinite(d) && d == Math.rint(d) && d >= Long.MIN_VALUE && d <= Long.MAX_VALUE) {
++                sb.append((long) d);
++            } else {
++                sb.append(n);
++            }
++        } else if (value instanceof String s) {
++            writeString(s, sb);
++        } else if (value instanceof Map<?, ?> map) {
++            sb.append('{');
++            boolean first = true;
++            for (var entry : map.entrySet()) {
++                if (!first) {
++                    sb.append(',');
++                }
++                first = false;
++                writeString(String.valueOf(entry.getKey()), sb);
++                sb.append(':');
++                write(entry.getValue(), sb);
++            }
++            sb.append('}');
++        } else if (value instanceof Iterable<?> iter) {
++            sb.append('[');
++            boolean first = true;
++            for (Object item : iter) {
++                if (!first) {
++                    sb.append(',');
++                }
++                first = false;
++                write(item, sb);
++            }
++            sb.append(']');
++        } else {
++            writeString(value.toString(), sb);
++        }
++    }
++
++    private static void writeString(String s, StringBuilder sb) {
++        sb.append('"');
++        for (int i = 0; i < s.length(); i++) {
++            char c = s.charAt(i);
++            switch (c) {
++                case '"' -> sb.append("\\\"");
++                case '\\' -> sb.append("\\\\");
++                case '\b' -> sb.append("\\b");
++                case '\f' -> sb.append("\\f");
++                case '\n' -> sb.append("\\n");
++                case '\r' -> sb.append("\\r");
++                case '\t' -> sb.append("\\t");
++                default -> {
++                    if (c < 0x20) {
++                        sb.append("\\u00");
++                        sb.append(Character.forDigit((c >> 4) & 0xF, 16));
++                        sb.append(Character.forDigit(c & 0xF, 16));
++                    } else {
++                        sb.append(c);
++                    }
++                }
++            }
++        }
++        sb.append('"');
++    }
++
++    private static final class Parser {
++        private final String s;
++        private int pos;
++
++        Parser(String s) {
++            this.s = s;
++        }
++
++        Object parseRoot() {
++            skipWs();
++            if (pos >= s.length()) {
++                return null;
++            }
++            return parseValue();
++        }
++
++        private void skipWs() {
++            while (pos < s.length()) {
++                char c = s.charAt(pos);
++                if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
++                    pos++;
++                } else {
++                    break;
++                }
++            }
++        }
++
++        private Object parseValue() {
++            skipWs();
++            if (pos >= s.length()) {
++                throw new IllegalArgumentException("Unexpected end of JSON");
++            }
++            char c = s.charAt(pos);
++            return switch (c) {
++                case '{' -> parseObject();
++                case '[' -> parseArray();
++                case '"' -> parseString();
++                case 't' -> parseLiteral("true", Boolean.TRUE);
++                case 'f' -> parseLiteral("false", Boolean.FALSE);
++                case 'n' -> parseLiteral("null", null);
++                default -> parseNumber();
++            };
++        }
++
++        private Object parseLiteral(String lit, Object val) {
++            if (!s.startsWith(lit, pos)) {
++                throw new IllegalArgumentException("Expected " + lit + " at " + pos);
++            }
++            pos += lit.length();
++            return val;
++        }
++
++        private Map<String, Object> parseObject() {
++            pos++; // '{'
++            var map = new LinkedHashMap<String, Object>();
++            skipWs();
++            if (pos < s.length() && s.charAt(pos) == '}') {
++                pos++;
++                return map;
++            }
++            while (pos < s.length()) {
++                skipWs();
++                String key = parseString();
++                skipWs();
++                if (pos >= s.length() || s.charAt(pos) != ':') {
++                    throw new IllegalArgumentException("Expected ':' at " + pos);
++                }
++                pos++;
++                Object val = parseValue();
++                map.put(key, val);
++                skipWs();
++                if (pos < s.length() && s.charAt(pos) == ',') {
++                    pos++;
++                } else if (pos < s.length() && s.charAt(pos) == '}') {
++                    pos++;
++                    return map;
++                } else {
++                    throw new IllegalArgumentException("Expected ',' or '}' at " + pos);
++                }
++            }
++            throw new IllegalArgumentException("Unterminated JSON object");
++        }
++
++        private List<Object> parseArray() {
++            pos++; // '['
++            var list = new ArrayList<Object>();
++            skipWs();
++            if (pos < s.length() && s.charAt(pos) == ']') {
++                pos++;
++                return list;
++            }
++            while (pos < s.length()) {
++                list.add(parseValue());
++                skipWs();
++                if (pos < s.length() && s.charAt(pos) == ',') {
++                    pos++;
++                } else if (pos < s.length() && s.charAt(pos) == ']') {
++                    pos++;
++                    return list;
++                } else {
++                    throw new IllegalArgumentException("Expected ',' or ']' at " + pos);
++                }
++            }
++            throw new IllegalArgumentException("Unterminated JSON array");
++        }
++
++        private String parseString() {
++            if (pos >= s.length() || s.charAt(pos) != '"') {
++                throw new IllegalArgumentException("Expected '\"' at " + pos);
++            }
++            pos++;
++            var sb = new StringBuilder();
++            while (pos < s.length()) {
++                char c = s.charAt(pos++);
++                if (c == '"') {
++                    return sb.toString();
++                }
++                if (c == '\\') {
++                    if (pos >= s.length()) {
++                        throw new IllegalArgumentException("Unterminated escape");
++                    }
++                    char e = s.charAt(pos++);
++                    switch (e) {
++                        case '"', '\\', '/' -> sb.append(e);
++                        case 'b' -> sb.append('\b');
++                        case 'f' -> sb.append('\f');
++                        case 'n' -> sb.append('\n');
++                        case 'r' -> sb.append('\r');
++                        case 't' -> sb.append('\t');
++                        case 'u' -> {
++                            int code = Integer.parseInt(s.substring(pos, pos + 4), 16);
++                            sb.append((char) code);
++                            pos += 4;
++                        }
++                        default -> throw new IllegalArgumentException("Invalid escape \\" + e);
++                    }
++                } else {
++                    sb.append(c);
++                }
++            }
++            throw new IllegalArgumentException("Unterminated JSON string");
++        }
++
++        private Number parseNumber() {
++            int start = pos;
++            if (s.charAt(pos) == '-') {
++                pos++;
++            }
++            while (pos < s.length() && Character.isDigit(s.charAt(pos))) {
++                pos++;
++            }
++            boolean isFloat = false;
++            if (pos < s.length() && s.charAt(pos) == '.') {
++                isFloat = true;
++                pos++;
++                while (pos < s.length() && Character.isDigit(s.charAt(pos))) {
++                    pos++;
++                }
++            }
++            if (pos < s.length() && (s.charAt(pos) == 'e' || s.charAt(pos) == 'E')) {
++                isFloat = true;
++                pos++;
++                if (pos < s.length() && (s.charAt(pos) == '+' || s.charAt(pos) == '-')) {
++                    pos++;
++                }
++                while (pos < s.length() && Character.isDigit(s.charAt(pos))) {
++                    pos++;
++                }
++            }
++            String num = s.substring(start, pos);
++            if (isFloat) {
++                return Double.parseDouble(num);
++            }
++            try {
++                return Long.parseLong(num);
++            } catch (NumberFormatException e) {
++                return Double.parseDouble(num);
++            }
++        }
++    }
++}
+diff --git a/compiler/src/main/java/org/teavm/javac/lsp/LanguageServer.java b/compiler/src/main/java/org/teavm/javac/lsp/LanguageServer.java
+new file mode 100644
+index 0000000..5775b66
+--- /dev/null
++++ b/compiler/src/main/java/org/teavm/javac/lsp/LanguageServer.java
+@@ -0,0 +1,395 @@
++package org.teavm.javac.lsp;
++
++import com.google.googlejavaformat.java.Formatter;
++import com.google.googlejavaformat.java.FormatterException;
++import com.google.googlejavaformat.java.JavaFormatterOptions;
++import java.io.ByteArrayInputStream;
++import java.io.IOException;
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Locale;
++import java.util.Map;
++import javax.tools.Diagnostic;
++import javax.tools.JavaFileObject;
++import org.teavm.compiler.bootstrap.ArchiveReader;
++import org.teavm.javac.FileData;
++import org.teavm.jso.JSClass;
++import org.teavm.jso.JSExport;
++import org.teavm.jso.typedarrays.Int8Array;
++
++@JSClass(name = "LanguageServer")
++public final class LanguageServer {
++    private final Map<String, FileData> sdkFiles = new LinkedHashMap<>();
++    private final SdkIndex sdkIndex = new SdkIndex();
++    private final JavacAnalyzer analyzer = new JavacAnalyzer(sdkFiles);
++    private final Map<String, SourceDoc> documents = new LinkedHashMap<>();
++    private NotificationHandler notificationHandler;
++    private JavacAnalyzer.AnalysisResult cachedAnalysis;
++    private long revision = 0;
++    private long cachedRevision = -1;
++
++    public LanguageServer() {
++    }
++
++    @JSExport
++    public void setSdk(Int8Array content) throws IOException {
++        sdkFiles.clear();
++        try (var input = new ArchiveReader(new ByteArrayInputStream(content.copyToJavaArray()))) {
++            while (true) {
++                var entry = input.readNext();
++                if (entry == null) {
++                    break;
++                }
++                var fd = new FileData(sdkFiles);
++                fd.path = entry;
++                fd.data = input.readData();
++                fd.lastModified = System.currentTimeMillis();
++                fd.isJavaBase = true;
++                sdkFiles.put(entry, fd);
++            }
++        }
++        sdkIndex.build(sdkFiles.keySet());
++        invalidateCache();
++    }
++
++    @JSExport
++    public void setWorkspaceFile(String uri, String content) {
++        if (uri == null || !uri.endsWith(".java")) {
++            return;
++        }
++        var existing = documents.get(uri);
++        if (existing != null) {
++            existing.setText(content);
++        } else {
++            documents.put(uri, new SourceDoc(uri, content));
++        }
++        invalidateCache();
++    }
++
++    @JSExport
++    public void setNotificationHandler(NotificationHandler handler) {
++        this.notificationHandler = handler;
++    }
++
++    @JSExport
++    public String handleMessage(String jsonRpc) {
++        Object parsed;
++        try {
++            parsed = Json.parse(jsonRpc);
++        } catch (Throwable e) {
++            return Json.stringify(Json.obj(
++                    "jsonrpc", "2.0",
++                    "id", null,
++                    "error", Json.obj("code", -32700, "message", "Parse error: " + e.getMessage())));
++        }
++        Map<String, Object> msg = Json.asObj(parsed);
++        if (msg == null) {
++            return null;
++        }
++        boolean hasId = msg.containsKey("id");
++        Object id = msg.get("id");
++        String method = Json.asStr(msg.get("method"));
++        Map<String, Object> params = Json.asObj(msg.get("params"));
++
++        if (method == null) {
++            return null;
++        }
++
++        try {
++            Object result = dispatch(method, params);
++            if (!hasId) {
++                return null;
++            }
++            return Json.stringify(Json.obj("jsonrpc", "2.0", "id", id, "result", result));
++        } catch (Throwable e) {
++            if (!hasId) {
++                return null;
++            }
++            return Json.stringify(Json.obj(
++                    "jsonrpc", "2.0",
++                    "id", id,
++                    "error", Json.obj("code", -32603, "message",
++                            e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
++        }
++    }
++
++    private Object dispatch(String method, Map<String, Object> params) {
++        return switch (method) {
++            case "initialize" -> handleInitialize();
++            case "initialized" -> {
++                publishAllDiagnostics();
++                yield null;
++            }
++            case "shutdown" -> null;
++            case "exit" -> null;
++            case "textDocument/didOpen" -> {
++                handleDidOpen(params);
++                yield null;
++            }
++            case "textDocument/didChange" -> {
++                handleDidChange(params);
++                yield null;
++            }
++            case "textDocument/didClose" -> {
++                handleDidClose(params);
++                yield null;
++            }
++            case "textDocument/completion" -> handleCompletion(params);
++            case "textDocument/hover" -> handleHover(params);
++            case "textDocument/signatureHelp" -> handleSignatureHelp(params);
++            case "textDocument/definition", "textDocument/declaration" -> handleDefinition(params);
++            case "textDocument/references" -> handleReferences(params);
++            case "textDocument/rename" -> handleRename(params);
++            case "textDocument/formatting" -> handleFormatting(params);
++            default -> null;
++        };
++    }
++
++    private Map<String, Object> handleInitialize() {
++        return Json.obj(
++                "capabilities", Json.obj(
++                        "textDocumentSync", 1,
++                        "completionProvider", Json.obj(
++                                "triggerCharacters", Json.arr(".")),
++                        "hoverProvider", true,
++                        "signatureHelpProvider", Json.obj(
++                                "triggerCharacters", Json.arr("(", ",")),
++                        "definitionProvider", true,
++                        "declarationProvider", true,
++                        "referencesProvider", true,
++                        "renameProvider", true,
++                        "documentFormattingProvider", true),
++                "serverInfo", Json.obj("name", "teavm-javac-lsp", "version", "0.1.0"));
++    }
++
++    private void handleDidOpen(Map<String, Object> params) {
++        var td = params != null ? Json.asObj(params.get("textDocument")) : null;
++        if (td == null) {
++            return;
++        }
++        String uri = Json.asStr(td.get("uri"));
++        String text = Json.asStr(td.get("text"));
++        if (uri == null || text == null) {
++            return;
++        }
++        var existing = documents.get(uri);
++        if (existing != null) {
++            existing.setText(text);
++        } else {
++            documents.put(uri, new SourceDoc(uri, text));
++        }
++        invalidateCache();
++        publishAllDiagnostics();
++    }
++
++    private void handleDidChange(Map<String, Object> params) {
++        var td = params != null ? Json.asObj(params.get("textDocument")) : null;
++        var changes = params != null ? Json.asList(params.get("contentChanges")) : null;
++        if (td == null || changes == null || changes.isEmpty()) {
++            return;
++        }
++        String uri = Json.asStr(td.get("uri"));
++        if (uri == null) {
++            return;
++        }
++        var doc = documents.computeIfAbsent(uri, u -> new SourceDoc(u, ""));
++        for (Object item : changes) {
++            var change = Json.asObj(item);
++            if (change == null) {
++                continue;
++            }
++            String newText = Json.asStr(change.get("text"));
++            if (newText == null) {
++                continue;
++            }
++            var range = Json.asObj(change.get("range"));
++            if (range == null) {
++                doc.setText(newText);
++            } else {
++                var start = Json.asObj(range.get("start"));
++                var end = Json.asObj(range.get("end"));
++                if (start != null && end != null) {
++                    int sOff = doc.offsetAt(Json.asInt(start.get("line"), 0), Json.asInt(start.get("character"), 0));
++                    int eOff = doc.offsetAt(Json.asInt(end.get("line"), 0), Json.asInt(end.get("character"), 0));
++                    doc.setText(doc.text.substring(0, sOff) + newText + doc.text.substring(eOff));
++                }
++            }
++        }
++        invalidateCache();
++        publishAllDiagnostics();
++    }
++
++    private void handleDidClose(Map<String, Object> params) {
++        var td = params != null ? Json.asObj(params.get("textDocument")) : null;
++        String uri = td != null ? Json.asStr(td.get("uri")) : null;
++        if (uri == null) {
++            return;
++        }
++        documents.remove(uri);
++        invalidateCache();
++        sendNotification("textDocument/publishDiagnostics",
++                Json.obj("uri", uri, "diagnostics", List.of()));
++    }
++
++    private Object handleCompletion(Map<String, Object> params) {
++        var doc = getDoc(params);
++        var pos = getPos(params);
++        if (doc == null || pos == null) {
++            return Json.obj("isIncomplete", false, "items", List.of());
++        }
++        return CompletionProvider.complete(analyzer, sdkIndex, documents, doc, pos[0], pos[1]);
++    }
++
++    private Object handleHover(Map<String, Object> params) {
++        var doc = getDoc(params);
++        var pos = getPos(params);
++        if (doc == null || pos == null) {
++            return null;
++        }
++        return HoverProvider.hover(getAnalysis(), doc, pos[0], pos[1]);
++    }
++
++    private Object handleSignatureHelp(Map<String, Object> params) {
++        var doc = getDoc(params);
++        var pos = getPos(params);
++        if (doc == null || pos == null) {
++            return null;
++        }
++        return SignatureHelpProvider.signatureHelp(analyzer, documents, getAnalysis(), doc, pos[0], pos[1]);
++    }
++
++    private Object handleDefinition(Map<String, Object> params) {
++        var doc = getDoc(params);
++        var pos = getPos(params);
++        if (doc == null || pos == null) {
++            return null;
++        }
++        return NavigationProvider.definition(getAnalysis(), documents, doc, pos[0], pos[1]);
++    }
++
++    private Object handleReferences(Map<String, Object> params) {
++        var doc = getDoc(params);
++        var pos = getPos(params);
++        if (doc == null || pos == null) {
++            return List.of();
++        }
++        var ctx = Json.asObj(params.get("context"));
++        boolean includeDecl = ctx == null || Json.asBool(ctx.get("includeDeclaration"), true);
++        return NavigationProvider.references(getAnalysis(), documents, doc, pos[0], pos[1], includeDecl);
++    }
++
++    private Object handleRename(Map<String, Object> params) {
++        var doc = getDoc(params);
++        var pos = getPos(params);
++        String newName = params != null ? Json.asStr(params.get("newName")) : null;
++        if (doc == null || pos == null || newName == null) {
++            return null;
++        }
++        return NavigationProvider.rename(getAnalysis(), documents, doc, pos[0], pos[1], newName);
++    }
++
++    private Object handleFormatting(Map<String, Object> params) {
++        var doc = getDoc(params);
++        if (doc == null) {
++            return null;
++        }
++        var opts = params != null ? Json.asObj(params.get("options")) : null;
++        int tabSize = opts != null ? Json.asInt(opts.get("tabSize"), 4) : 4;
++        var style = tabSize >= 4 ? JavaFormatterOptions.Style.AOSP : JavaFormatterOptions.Style.GOOGLE;
++        var gjfOpts = JavaFormatterOptions.builder().style(style).build();
++        try {
++            String formatted = new Formatter(gjfOpts).formatSource(doc.text);
++            if (formatted.equals(doc.text)) {
++                return List.of();
++            }
++            return Json.arr(Json.obj("range", doc.fullDocumentRange(), "newText", formatted));
++        } catch (FormatterException e) {
++            return List.of();
++        }
++    }
++
++    private void publishAllDiagnostics() {
++        if (notificationHandler == null) {
++            return;
++        }
++        var analysis = getAnalysis();
++        for (var entry : analysis.diagnosticsByUri.entrySet()) {
++            String uri = entry.getKey();
++            SourceDoc doc = documents.get(uri);
++            if (doc == null) {
++                continue;
++            }
++            List<Object> lspDiags = new ArrayList<>();
++            for (Diagnostic<? extends JavaFileObject> d : entry.getValue()) {
++                int severity = switch (d.getKind()) {
++                    case ERROR -> 1;
++                    case WARNING, MANDATORY_WARNING -> 2;
++                    case NOTE -> 3;
++                    case OTHER -> 4;
++                };
++                int start = d.getStartPosition() >= 0 ? (int) d.getStartPosition()
++                        : (d.getPosition() >= 0 ? (int) d.getPosition() : 0);
++                int end = d.getEndPosition() >= start ? (int) d.getEndPosition() : start;
++                if (end <= start && start < doc.text.length()) {
++                    // Expand zero-width error span to at least the current token/char for visibility
++                    int tokEnd = start + 1;
++                    if (Character.isJavaIdentifierPart(doc.text.charAt(start))) {
++                        while (tokEnd < doc.text.length() && Character.isJavaIdentifierPart(doc.text.charAt(tokEnd))) {
++                            tokEnd++;
++                        }
++                    }
++                    end = tokEnd;
++                }
++                String message = d.getMessage(Locale.ENGLISH);
++                if (message == null || message.isEmpty()) {
++                    message = d.toString();
++                }
++                lspDiags.add(Json.obj(
++                        "range", doc.range(start, end),
++                        "severity", severity,
++                        "source", "javac",
++                        "message", message));
++            }
++            sendNotification("textDocument/publishDiagnostics",
++                    Json.obj("uri", uri, "diagnostics", lspDiags));
++        }
++    }
++
++    private void sendNotification(String method, Object params) {
++        if (notificationHandler != null) {
++            notificationHandler.onNotification(
++                    Json.stringify(Json.obj("jsonrpc", "2.0", "method", method, "params", params)));
++        }
++    }
++
++    private JavacAnalyzer.AnalysisResult getAnalysis() {
++        if (cachedAnalysis == null || cachedRevision != revision) {
++            cachedAnalysis = analyzer.analyze(documents, true);
++            cachedRevision = revision;
++        }
++        return cachedAnalysis;
++    }
++
++    private void invalidateCache() {
++        revision++;
++        cachedAnalysis = null;
++    }
++
++    private SourceDoc getDoc(Map<String, Object> params) {
++        var td = params != null ? Json.asObj(params.get("textDocument")) : null;
++        String uri = td != null ? Json.asStr(td.get("uri")) : null;
++        return uri != null ? documents.get(uri) : null;
++    }
++
++    private int[] getPos(Map<String, Object> params) {
++        var pos = params != null ? Json.asObj(params.get("position")) : null;
++        if (pos == null) {
++            return null;
++        }
++        return new int[] {
++                Json.asInt(pos.get("line"), 0),
++                Json.asInt(pos.get("character"), 0)
++        };
++    }
++}
+diff --git a/compiler/src/main/java/org/teavm/javac/lsp/NavigationProvider.java b/compiler/src/main/java/org/teavm/javac/lsp/NavigationProvider.java
+new file mode 100644
+index 0000000..42056be
+--- /dev/null
++++ b/compiler/src/main/java/org/teavm/javac/lsp/NavigationProvider.java
+@@ -0,0 +1,357 @@
++package org.teavm.javac.lsp;
++
++import com.sun.source.util.TreePath;
++import com.sun.tools.javac.code.Symbol;
++import com.sun.tools.javac.tree.JCTree;
++import com.sun.tools.javac.tree.TreeScanner;
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.LinkedHashMap;
++import java.util.LinkedHashSet;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++
++final class NavigationProvider {
++    private static final Set<String> JAVA_KEYWORDS = Set.of(
++            "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class",
++            "const", "continue", "default", "do", "double", "else", "enum", "extends", "final",
++            "finally", "float", "for", "goto", "if", "implements", "import", "instanceof", "int",
++            "interface", "long", "native", "new", "package", "private", "protected", "public",
++            "return", "short", "static", "strictfp", "super", "switch", "synchronized", "this",
++            "throw", "throws", "transient", "try", "void", "volatile", "while", "true", "false", "null");
++
++    private NavigationProvider() {
++    }
++
++    static Map<String, Object> definition(
++            JavacAnalyzer.AnalysisResult analysis,
++            Map<String, SourceDoc> docs,
++            SourceDoc doc,
++            int line,
++            int character) {
++        Symbol target = resolveTargetSymbol(analysis, doc, line, character);
++        if (target == null) {
++            return null;
++        }
++        Span decl = findDeclaration(analysis, docs, target);
++        if (decl == null && target instanceof Symbol.MethodSymbol ms && ms.isConstructor() && ms.owner != null) {
++            decl = findDeclaration(analysis, docs, ms.owner);
++        }
++        if (decl == null) {
++            return null;
++        }
++        return decl.doc.location(decl.start, decl.end);
++    }
++
++    static List<Object> references(
++            JavacAnalyzer.AnalysisResult analysis,
++            Map<String, SourceDoc> docs,
++            SourceDoc doc,
++            int line,
++            int character,
++            boolean includeDeclaration) {
++        Symbol target = resolveTargetSymbol(analysis, doc, line, character);
++        if (target == null) {
++            return List.of();
++        }
++        List<Span> spans = collectAllOccurrences(analysis, docs, target, includeDeclaration, false);
++        List<Object> result = new ArrayList<>(spans.size());
++        for (Span s : spans) {
++            result.add(s.doc.location(s.start, s.end));
++        }
++        return result;
++    }
++
++    static Map<String, Object> rename(
++            JavacAnalyzer.AnalysisResult analysis,
++            Map<String, SourceDoc> docs,
++            SourceDoc doc,
++            int line,
++            int character,
++            String newName) {
++        if (!isValidIdentifier(newName)) {
++            return null;
++        }
++        Symbol target = resolveTargetSymbol(analysis, doc, line, character);
++        if (target == null) {
++            return null;
++        }
++        // Only allow renaming symbols declared in the workspace (not java.base SDK symbols).
++        Symbol canonical = target;
++        if (canonical instanceof Symbol.MethodSymbol ms && ms.isConstructor() && ms.owner != null) {
++            canonical = ms.owner;
++        }
++        if (findDeclaration(analysis, docs, canonical) == null) {
++            return null;
++        }
++
++        List<Span> spans = collectAllOccurrences(analysis, docs, canonical, true, true);
++        if (spans.isEmpty()) {
++            return null;
++        }
++
++        Map<String, List<Object>> changes = new LinkedHashMap<>();
++        for (Span s : spans) {
++            changes.computeIfAbsent(s.doc.uri, k -> new ArrayList<>())
++                    .add(Json.obj("range", s.doc.range(s.start, s.end), "newText", newName));
++        }
++        return Json.obj("changes", changes);
++    }
++
++    private record Span(SourceDoc doc, int start, int end) {
++    }
++
++    private static Symbol resolveTargetSymbol(
++            JavacAnalyzer.AnalysisResult analysis,
++            SourceDoc doc,
++            int line,
++            int character) {
++        var unit = analysis.unitsByUri.get(doc.uri);
++        if (unit == null) {
++            return null;
++        }
++        int offset = doc.offsetAt(line, character);
++        TreePath path = TreeLocator.findInnermostPath(unit, offset);
++        if (path == null) {
++            return null;
++        }
++        return TreeLocator.resolveSymbol(path);
++    }
++
++    private static Span findDeclaration(
++            JavacAnalyzer.AnalysisResult analysis,
++            Map<String, SourceDoc> docs,
++            Symbol target) {
++        for (var entry : analysis.unitsByUri.entrySet()) {
++            SourceDoc doc = docs.get(entry.getKey());
++            JCTree.JCCompilationUnit unit = entry.getValue();
++            if (doc == null || unit == null) {
++                continue;
++            }
++            var finder = new DeclarationFinder(unit, doc, target);
++            finder.scan(unit);
++            if (finder.found != null) {
++                return finder.found;
++            }
++        }
++        return null;
++    }
++
++    private static List<Span> collectAllOccurrences(
++            JavacAnalyzer.AnalysisResult analysis,
++            Map<String, SourceDoc> docs,
++            Symbol target,
++            boolean includeDeclaration,
++            boolean includeConstructorsForClass) {
++        List<Span> raw = new ArrayList<>();
++        for (var entry : analysis.unitsByUri.entrySet()) {
++            SourceDoc doc = docs.get(entry.getKey());
++            JCTree.JCCompilationUnit unit = entry.getValue();
++            if (doc == null || unit == null) {
++                continue;
++            }
++            var scanner = new ReferenceFinder(unit, doc, target, includeDeclaration, includeConstructorsForClass, raw);
++            scanner.scan(unit);
++        }
++        raw.sort(Comparator.comparing((Span s) -> s.doc.uri).thenComparingInt(s -> s.start));
++        Set<String> seen = new LinkedHashSet<>();
++        List<Span> dedup = new ArrayList<>(raw.size());
++        for (Span s : raw) {
++            if (seen.add(s.doc.uri + ":" + s.start + ":" + s.end)) {
++                dedup.add(s);
++            }
++        }
++        return dedup;
++    }
++
++    private static boolean symbolsMatch(Symbol candidate, Symbol target, boolean includeConstructorsForClass) {
++        if (candidate == null || target == null) {
++            return false;
++        }
++        if (candidate == target || candidate.baseSymbol() == target.baseSymbol()) {
++            return true;
++        }
++        if (includeConstructorsForClass
++                && target instanceof Symbol.ClassSymbol
++                && candidate instanceof Symbol.MethodSymbol ms
++                && ms.isConstructor()
++                && ms.owner == target) {
++            return true;
++        }
++        return false;
++    }
++
++    private static boolean isValidIdentifier(String name) {
++        if (name == null || name.isEmpty() || JAVA_KEYWORDS.contains(name)) {
++            return false;
++        }
++        if (!Character.isJavaIdentifierStart(name.charAt(0))) {
++            return false;
++        }
++        for (int i = 1; i < name.length(); i++) {
++            if (!Character.isJavaIdentifierPart(name.charAt(i))) {
++                return false;
++            }
++        }
++        return true;
++    }
++
++    private static final class DeclarationFinder extends TreeScanner {
++        private final JCTree.JCCompilationUnit unit;
++        private final SourceDoc doc;
++        private final Symbol target;
++        Span found;
++
++        DeclarationFinder(JCTree.JCCompilationUnit unit, SourceDoc doc, Symbol target) {
++            this.unit = unit;
++            this.doc = doc;
++            this.target = target;
++        }
++
++        @Override
++        public void visitClassDef(JCTree.JCClassDecl tree) {
++            if (found == null && symbolsMatch(tree.sym, target, false)) {
++                int s = TreeLocator.startPos(tree);
++                int e = TreeLocator.endPos(tree, unit);
++                int[] span = doc.findIdentifierSpan(s, e, tree.name.toString());
++                found = new Span(doc, span[0], span[1]);
++                return;
++            }
++            super.visitClassDef(tree);
++        }
++
++        @Override
++        public void visitMethodDef(JCTree.JCMethodDecl tree) {
++            if (found == null && symbolsMatch(tree.sym, target, false)) {
++                String name = tree.sym.isConstructor()
++                        ? tree.sym.owner.name.toString()
++                        : tree.name.toString();
++                int s = TreeLocator.startPos(tree);
++                int e = TreeLocator.endPos(tree, unit);
++                int[] span = doc.findIdentifierSpan(s, e, name);
++                found = new Span(doc, span[0], span[1]);
++                return;
++            }
++            super.visitMethodDef(tree);
++        }
++
++        @Override
++        public void visitVarDef(JCTree.JCVariableDecl tree) {
++            if (found == null && symbolsMatch(tree.sym, target, false)) {
++                int s = TreeLocator.startPos(tree);
++                int e = tree.init != null ? TreeLocator.startPos(tree.init) : TreeLocator.endPos(tree, unit);
++                int[] span = doc.findLastIdentifierSpan(s, e, tree.name.toString());
++                found = new Span(doc, span[0], span[1]);
++                return;
++            }
++            super.visitVarDef(tree);
++        }
++
++        @Override
++        public void visitTypeParameter(JCTree.JCTypeParameter tree) {
++            if (found == null && tree.type != null && symbolsMatch(tree.type.tsym, target, false)) {
++                int s = TreeLocator.startPos(tree);
++                int e = TreeLocator.endPos(tree, unit);
++                int[] span = doc.findIdentifierSpan(s, e, tree.name.toString());
++                found = new Span(doc, span[0], span[1]);
++                return;
++            }
++            super.visitTypeParameter(tree);
++        }
++    }
++
++    private static final class ReferenceFinder extends TreeScanner {
++        private final JCTree.JCCompilationUnit unit;
++        private final SourceDoc doc;
++        private final Symbol target;
++        private final boolean includeDeclaration;
++        private final boolean includeConstructorsForClass;
++        private final List<Span> out;
++
++        ReferenceFinder(
++                JCTree.JCCompilationUnit unit,
++                SourceDoc doc,
++                Symbol target,
++                boolean includeDeclaration,
++                boolean includeConstructorsForClass,
++                List<Span> out) {
++            this.unit = unit;
++            this.doc = doc;
++            this.target = target;
++            this.includeDeclaration = includeDeclaration;
++            this.includeConstructorsForClass = includeConstructorsForClass;
++            this.out = out;
++        }
++
++        @Override
++        public void visitClassDef(JCTree.JCClassDecl tree) {
++            if (includeDeclaration && symbolsMatch(tree.sym, target, false)) {
++                int[] span = doc.findIdentifierSpan(TreeLocator.startPos(tree), TreeLocator.endPos(tree, unit),
++                        tree.name.toString());
++                out.add(new Span(doc, span[0], span[1]));
++            }
++            super.visitClassDef(tree);
++        }
++
++        @Override
++        public void visitMethodDef(JCTree.JCMethodDecl tree) {
++            if (includeDeclaration && symbolsMatch(tree.sym, target, includeConstructorsForClass)) {
++                String name = tree.sym.isConstructor()
++                        ? tree.sym.owner.name.toString()
++                        : tree.name.toString();
++                // Skip synthetic default constructor whose pos equals class start
++                if (!tree.sym.isConstructor() || (tree.mods.flags & com.sun.tools.javac.code.Flags.GENERATEDCONSTR) == 0) {
++                    int[] span = doc.findIdentifierSpan(TreeLocator.startPos(tree), TreeLocator.endPos(tree, unit),
++                            name);
++                    out.add(new Span(doc, span[0], span[1]));
++                }
++            }
++            super.visitMethodDef(tree);
++        }
++
++        @Override
++        public void visitVarDef(JCTree.JCVariableDecl tree) {
++            if (includeDeclaration && symbolsMatch(tree.sym, target, false)) {
++                int s = TreeLocator.startPos(tree);
++                int e = tree.init != null ? TreeLocator.startPos(tree.init) : TreeLocator.endPos(tree, unit);
++                int[] span = doc.findLastIdentifierSpan(s, e, tree.name.toString());
++                out.add(new Span(doc, span[0], span[1]));
++            }
++            super.visitVarDef(tree);
++        }
++
++        @Override
++        public void visitIdent(JCTree.JCIdent tree) {
++            if (symbolsMatch(tree.sym, target, includeConstructorsForClass)) {
++                int s = TreeLocator.startPos(tree);
++                int e = TreeLocator.endPos(tree, unit);
++                int[] span = doc.findIdentifierSpan(s, e, tree.name.toString());
++                out.add(new Span(doc, span[0], span[1]));
++            }
++            super.visitIdent(tree);
++        }
++
++        @Override
++        public void visitSelect(JCTree.JCFieldAccess tree) {
++            if (symbolsMatch(tree.sym, target, includeConstructorsForClass)) {
++                int s = TreeLocator.startPos(tree);
++                int e = TreeLocator.endPos(tree, unit);
++                int[] span = doc.findLastIdentifierSpan(s, e, tree.name.toString());
++                out.add(new Span(doc, span[0], span[1]));
++            }
++            super.visitSelect(tree);
++        }
++
++        @Override
++        public void visitReference(JCTree.JCMemberReference tree) {
++            if (symbolsMatch(tree.sym, target, includeConstructorsForClass)) {
++                int s = TreeLocator.startPos(tree);
++                int e = TreeLocator.endPos(tree, unit);
++                int[] span = doc.findLastIdentifierSpan(s, e, tree.name.toString());
++                out.add(new Span(doc, span[0], span[1]));
++            }
++            super.visitReference(tree);
++        }
++    }
++}
+diff --git a/compiler/src/main/java/org/teavm/javac/lsp/NotificationHandler.java b/compiler/src/main/java/org/teavm/javac/lsp/NotificationHandler.java
+new file mode 100644
+index 0000000..a328ebb
+--- /dev/null
++++ b/compiler/src/main/java/org/teavm/javac/lsp/NotificationHandler.java
+@@ -0,0 +1,9 @@
++package org.teavm.javac.lsp;
++
++import org.teavm.jso.JSFunctor;
++import org.teavm.jso.JSObject;
++
++@JSFunctor
++public interface NotificationHandler extends JSObject {
++    void onNotification(String jsonRpc);
++}
+diff --git a/compiler/src/main/java/org/teavm/javac/lsp/SdkIndex.java b/compiler/src/main/java/org/teavm/javac/lsp/SdkIndex.java
+new file mode 100644
+index 0000000..7247ba5
+--- /dev/null
++++ b/compiler/src/main/java/org/teavm/javac/lsp/SdkIndex.java
+@@ -0,0 +1,68 @@
++package org.teavm.javac.lsp;
++
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++import java.util.TreeSet;
++
++final class SdkIndex {
++    final Map<String, Set<String>> subPackages = new HashMap<>();
++    final Map<String, List<String>> classesInPackage = new HashMap<>();
++    final List<String> allTopLevelClasses = new ArrayList<>();
++
++    void build(Set<String> sdkEntries) {
++        subPackages.clear();
++        classesInPackage.clear();
++        allTopLevelClasses.clear();
++
++        Map<String, Set<String>> pkgClasses = new HashMap<>();
++        for (String entry : sdkEntries) {
++            if (!entry.endsWith(".class") || entry.equals("module-info.class")) {
++                continue;
++            }
++            String internal = entry.substring(0, entry.length() - 6);
++            int slash = internal.lastIndexOf('/');
++            if (slash < 0) {
++                continue;
++            }
++            String simple = internal.substring(slash + 1);
++            if (simple.contains("$")) {
++                continue;
++            }
++            String pkg = internal.substring(0, slash).replace('/', '.');
++            if (pkg.contains(".impl") || pkg.startsWith("org.teavm.")) {
++                continue;
++            }
++            pkgClasses.computeIfAbsent(pkg, k -> new TreeSet<>()).add(simple);
++            allTopLevelClasses.add(pkg + "." + simple);
++
++            String cur = pkg;
++            while (true) {
++                int dot = cur.lastIndexOf('.');
++                if (dot < 0) {
++                    subPackages.computeIfAbsent("", k -> new TreeSet<>()).add(cur);
++                    break;
++                }
++                String parent = cur.substring(0, dot);
++                String child = cur.substring(dot + 1);
++                subPackages.computeIfAbsent(parent, k -> new TreeSet<>()).add(child);
++                cur = parent;
++            }
++        }
++        for (var e : pkgClasses.entrySet()) {
++            classesInPackage.put(e.getKey(), new ArrayList<>(e.getValue()));
++        }
++        Collections.sort(allTopLevelClasses);
++    }
++
++    Set<String> getSubPackages(String pkg) {
++        return subPackages.getOrDefault(pkg, Set.of());
++    }
++
++    List<String> getClassesInPackage(String pkg) {
++        return classesInPackage.getOrDefault(pkg, List.of());
++    }
++}
+diff --git a/compiler/src/main/java/org/teavm/javac/lsp/SignatureHelpProvider.java b/compiler/src/main/java/org/teavm/javac/lsp/SignatureHelpProvider.java
+new file mode 100644
+index 0000000..33db935
+--- /dev/null
++++ b/compiler/src/main/java/org/teavm/javac/lsp/SignatureHelpProvider.java
+@@ -0,0 +1,311 @@
++package org.teavm.javac.lsp;
++
++import com.sun.source.tree.Tree;
++import com.sun.source.util.TreePath;
++import com.sun.tools.javac.code.Flags;
++import com.sun.tools.javac.code.Symbol;
++import com.sun.tools.javac.code.Type;
++import com.sun.tools.javac.tree.JCTree;
++import java.util.ArrayList;
++import java.util.LinkedHashSet;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++
++final class SignatureHelpProvider {
++    private SignatureHelpProvider() {
++    }
++
++    static Map<String, Object> signatureHelp(
++            JavacAnalyzer analyzer,
++            Map<String, SourceDoc> docs,
++            JavacAnalyzer.AnalysisResult cached,
++            SourceDoc doc,
++            int line,
++            int character) {
++        int offset = doc.offsetAt(line, character);
++        int openParen = findEnclosingOpenParen(doc.text, offset);
++        if (openParen < 0) {
++            return null;
++        }
++        int activeParam = countTopLevelCommas(doc.text, openParen + 1, offset);
++
++        // Try cached analysis first; if syntax is incomplete around `foo(|`, patch `)` and re-analyze.
++        var analysis = cached;
++        var unit = analysis != null ? analysis.unitsByUri.get(doc.uri) : null;
++        TreePath callPath = unit != null ? findEnclosingCall(unit, offset) : null;
++
++        if (callPath == null) {
++            String patched = doc.text.substring(0, offset) + ");" + doc.text.substring(offset);
++            analysis = analyzer.analyzeWithOverride(docs, doc.uri, patched, false);
++            unit = analysis.unitsByUri.get(doc.uri);
++            if (unit != null) {
++                callPath = findEnclosingCall(unit, offset);
++            }
++        }
++        if (callPath == null || analysis == null) {
++            return null;
++        }
++
++        List<Candidate> candidates = new ArrayList<>();
++        Tree leaf = callPath.getLeaf();
++        if (leaf instanceof JCTree.JCMethodInvocation inv) {
++            collectMethodOverloads(analysis, inv, candidates);
++        } else if (leaf instanceof JCTree.JCNewClass nc) {
++            collectConstructors(analysis, nc, candidates);
++        }
++        if (candidates.isEmpty()) {
++            return null;
++        }
++
++        List<Object> signatures = new ArrayList<>();
++        int activeSig = 0;
++        for (int i = 0; i < candidates.size(); i++) {
++            var c = candidates.get(i);
++            signatures.add(buildSignatureInfo(c.method, c.memberType));
++            int paramCount = c.method.params() != null ? c.method.params().size() : 0;
++            boolean varargs = (c.method.flags() & Flags.VARARGS) != 0;
++            if (activeParam < paramCount || (varargs && paramCount > 0)) {
++                if (activeSig == 0 && i > 0) {
++                    activeSig = i;
++                }
++            }
++        }
++        // Prefer exact match if the chosen one has fewer params
++        for (int i = 0; i < candidates.size(); i++) {
++            var c = candidates.get(i);
++            int paramCount = c.method.params() != null ? c.method.params().size() : 0;
++            boolean varargs = (c.method.flags() & Flags.VARARGS) != 0;
++            if (paramCount > activeParam || (varargs && paramCount > 0)) {
++                activeSig = i;
++                break;
++            }
++        }
++
++        return Json.obj(
++                "signatures", signatures,
++                "activeSignature", activeSig,
++                "activeParameter", activeParam);
++    }
++
++    private record Candidate(Symbol.MethodSymbol method, Type memberType) {
++    }
++
++    private static void collectMethodOverloads(
++            JavacAnalyzer.AnalysisResult analysis,
++            JCTree.JCMethodInvocation inv,
++            List<Candidate> out) {
++        Type receiverType = null;
++        String methodName = null;
++        boolean staticOnly = false;
++
++        if (inv.meth instanceof JCTree.JCFieldAccess fa) {
++            methodName = fa.name.toString();
++            receiverType = fa.selected != null ? fa.selected.type : null;
++            staticOnly = isTypeReference(fa.selected);
++        } else if (inv.meth instanceof JCTree.JCIdent ident) {
++            methodName = ident.name.toString();
++            if (ident.sym instanceof Symbol.MethodSymbol ms && ms.owner instanceof Symbol.ClassSymbol cs) {
++                receiverType = cs.type;
++            }
++        }
++        if (methodName == null || receiverType == null || receiverType.isErroneous() || receiverType.tsym == null) {
++            if (inv.meth instanceof JCTree.JCIdent ident && ident.sym instanceof Symbol.MethodSymbol ms) {
++                out.add(new Candidate(ms, ms.type));
++            } else if (inv.meth instanceof JCTree.JCFieldAccess fa && fa.sym instanceof Symbol.MethodSymbol ms) {
++                out.add(new Candidate(ms, ms.type));
++            }
++            return;
++        }
++
++        Set<String> seen = new LinkedHashSet<>();
++        collectOverloadsInHierarchy(analysis, receiverType, receiverType, methodName, staticOnly, seen, out);
++    }
++
++    private static void collectOverloadsInHierarchy(
++            JavacAnalyzer.AnalysisResult analysis,
++            Type rootReceiver,
++            Type currentType,
++            String methodName,
++            boolean staticOnly,
++            Set<String> seen,
++            List<Candidate> out) {
++        if (currentType == null || currentType.isErroneous() || !(currentType.tsym instanceof Symbol.ClassSymbol cs)) {
++            return;
++        }
++        var members = cs.members();
++        if (members != null) {
++            for (Symbol sym : members.getSymbolsByName(analysis.names.fromString(methodName))) {
++                if (!(sym instanceof Symbol.MethodSymbol ms)) {
++                    continue;
++                }
++                if ((ms.flags() & (Flags.SYNTHETIC | Flags.BRIDGE)) != 0) {
++                    continue;
++                }
++                boolean isStatic = (ms.flags() & Flags.STATIC) != 0;
++                if (staticOnly && !isStatic) {
++                    continue;
++                }
++                Type mt = TypeFormatter.resolveMemberType(analysis.types, rootReceiver, ms);
++                String sigKey = ms.name + "(" + TypeFormatter.formatMethodParamTypesKey(ms, mt) + ")";
++                if (seen.add(sigKey)) {
++                    out.add(new Candidate(ms, mt));
++                }
++            }
++        }
++        Type sup = analysis.types.supertype(currentType);
++        if (sup != null && sup != Type.noType && sup != currentType) {
++            collectOverloadsInHierarchy(analysis, rootReceiver, sup, methodName, staticOnly, seen, out);
++        }
++        for (Type iface : analysis.types.interfaces(currentType)) {
++            collectOverloadsInHierarchy(analysis, rootReceiver, iface, methodName, staticOnly, seen, out);
++        }
++    }
++
++    private static void collectConstructors(
++            JavacAnalyzer.AnalysisResult analysis,
++            JCTree.JCNewClass nc,
++            List<Candidate> out) {
++        Type type = nc.type;
++        if ((type == null || type.isErroneous()) && nc.clazz != null) {
++            type = nc.clazz.type;
++        }
++        if (type == null || type.isErroneous() || !(type.tsym instanceof Symbol.ClassSymbol cs)) {
++            return;
++        }
++        var members = cs.members();
++        if (members == null) {
++            return;
++        }
++        Set<String> seen = new LinkedHashSet<>();
++        for (Symbol sym : members.getSymbolsByName(analysis.names.init)) {
++            if (!(sym instanceof Symbol.MethodSymbol ms)) {
++                continue;
++            }
++            if ((ms.flags() & Flags.SYNTHETIC) != 0) {
++                continue;
++            }
++            Type mt = TypeFormatter.resolveMemberType(analysis.types, type, ms);
++            String sigKey = "(" + TypeFormatter.formatMethodParamTypesKey(ms, mt) + ")";
++            if (seen.add(sigKey)) {
++                out.add(new Candidate(ms, mt));
++            }
++        }
++    }
++
++    private static Map<String, Object> buildSignatureInfo(Symbol.MethodSymbol method, Type memberType) {
++        String label = TypeFormatter.formatMethodSignature(method, memberType, false);
++        var params = method.params();
++        List<Type> paramTypes = memberType instanceof Type.MethodType mt
++                ? mt.argtypes
++                : (method.type instanceof Type.MethodType mt2 ? mt2.argtypes : List.of());
++        boolean isVarArgs = (method.flags() & Flags.VARARGS) != 0;
++        int n = Math.max(params != null ? params.size() : 0, paramTypes != null ? paramTypes.size() : 0);
++
++        List<Object> paramInfos = new ArrayList<>();
++        for (int i = 0; i < n; i++) {
++            Type pt = (paramTypes != null && i < paramTypes.size())
++                    ? paramTypes.get(i)
++                    : (params != null && i < params.size() ? params.get(i).type : null);
++            String typeStr = (isVarArgs && i == n - 1 && pt instanceof Type.ArrayType at)
++                    ? TypeFormatter.shortType(at.elemtype) + "..."
++                    : TypeFormatter.shortType(pt);
++            String pLabel = (params != null && i < params.size() && !params.get(i).name.isEmpty())
++                    ? typeStr + " " + params.get(i).name
++                    : typeStr;
++            paramInfos.add(Json.obj("label", pLabel));
++        }
++        return Json.obj("label", label, "parameters", paramInfos);
++    }
++
++    private static TreePath findEnclosingCall(JCTree.JCCompilationUnit unit, int offset) {
++        TreePath path = TreeLocator.findInnermostPath(unit, offset);
++        while (path != null) {
++            Tree leaf = path.getLeaf();
++            if (leaf instanceof JCTree.JCMethodInvocation || leaf instanceof JCTree.JCNewClass) {
++                return path;
++            }
++            path = path.getParentPath();
++        }
++        return null;
++    }
++
++    private static boolean isTypeReference(JCTree.JCExpression expr) {
++        if (expr instanceof JCTree.JCIdent ident) {
++            return ident.sym instanceof Symbol.ClassSymbol;
++        }
++        if (expr instanceof JCTree.JCFieldAccess fa) {
++            return fa.sym instanceof Symbol.ClassSymbol;
++        }
++        return false;
++    }
++
++    private static int findEnclosingOpenParen(String text, int offset) {
++        int depth = 0;
++        boolean inStr = false;
++        boolean inChar = false;
++        for (int i = Math.min(offset, text.length()) - 1; i >= 0; i--) {
++            char c = text.charAt(i);
++            if (c == '"' && !inChar && (i == 0 || text.charAt(i - 1) != '\\')) {
++                inStr = !inStr;
++                continue;
++            }
++            if (c == '\'' && !inStr && (i == 0 || text.charAt(i - 1) != '\\')) {
++                inChar = !inChar;
++                continue;
++            }
++            if (inStr || inChar) {
++                continue;
++            }
++            if (c == ')') {
++                depth++;
++            } else if (c == '(') {
++                if (depth == 0) {
++                    return i;
++                }
++                depth--;
++            } else if (c == ';' || c == '{' || c == '}') {
++                return -1;
++            }
++        }
++        return -1;
++    }
++
++    private static int countTopLevelCommas(String text, int start, int end) {
++        int commas = 0;
++        int paren = 0;
++        int bracket = 0;
++        int angle = 0;
++        boolean inStr = false;
++        boolean inChar = false;
++        for (int i = Math.max(0, start); i < Math.min(end, text.length()); i++) {
++            char c = text.charAt(i);
++            if (c == '\\' && (inStr || inChar)) {
++                i++;
++                continue;
++            }
++            if (c == '"' && !inChar) {
++                inStr = !inStr;
++            } else if (c == '\'' && !inStr) {
++                inChar = !inChar;
++            } else if (!inStr && !inChar) {
++                if (c == '(') {
++                    paren++;
++                } else if (c == ')' && paren > 0) {
++                    paren--;
++                } else if (c == '[') {
++                    bracket++;
++                } else if (c == ']' && bracket > 0) {
++                    bracket--;
++                } else if (c == '<') {
++                    angle++;
++                } else if (c == '>' && angle > 0) {
++                    angle--;
++                } else if (c == ',' && paren == 0 && bracket == 0 && angle == 0) {
++                    commas++;
++                }
++            }
++        }
++        return commas;
++    }
++}
+diff --git a/compiler/src/main/java/org/teavm/javac/lsp/SourceDoc.java b/compiler/src/main/java/org/teavm/javac/lsp/SourceDoc.java
+new file mode 100644
+index 0000000..8e004e0
+--- /dev/null
++++ b/compiler/src/main/java/org/teavm/javac/lsp/SourceDoc.java
+@@ -0,0 +1,149 @@
++package org.teavm.javac.lsp;
++
++import java.util.Arrays;
++import java.util.Map;
++
++final class SourceDoc {
++    final String uri;
++    final String relPath;
++    String text;
++    private int[] lineStarts;
++
++    SourceDoc(String uri, String text) {
++        this.uri = uri;
++        this.relPath = uriToRelPath(uri);
++        setText(text);
++    }
++
++    static String uriToRelPath(String uri) {
++        String p = uri;
++        if (p.startsWith("file:///workdir/")) {
++            p = p.substring("file:///workdir/".length());
++        } else if (p.startsWith("file:///")) {
++            p = p.substring("file:///".length());
++        } else if (p.startsWith("file://")) {
++            p = p.substring("file://".length());
++        }
++        while (p.startsWith("/")) {
++            p = p.substring(1);
++        }
++        return p;
++    }
++
++    void setText(String newText) {
++        this.text = newText != null ? newText : "";
++        int lines = 1;
++        for (int i = 0; i < this.text.length(); i++) {
++            if (this.text.charAt(i) == '\n') {
++                lines++;
++            }
++        }
++        int[] starts = new int[lines];
++        int idx = 1;
++        for (int i = 0; i < this.text.length(); i++) {
++            if (this.text.charAt(i) == '\n') {
++                starts[idx++] = i + 1;
++            }
++        }
++        this.lineStarts = starts;
++    }
++
++    int lineCount() {
++        return lineStarts.length;
++    }
++
++    int offsetAt(int line, int character) {
++        if (line < 0) {
++            return 0;
++        }
++        if (line >= lineStarts.length) {
++            return text.length();
++        }
++        int lineStart = lineStarts[line];
++        int lineEnd = (line + 1 < lineStarts.length) ? lineStarts[line + 1] - 1 : text.length();
++        if (lineEnd > lineStart && text.charAt(lineEnd - 1) == '\r') {
++            lineEnd--;
++        }
++        return Math.min(lineStart + Math.max(0, character), lineEnd);
++    }
++
++    int[] positionAt(int offset) {
++        int clamped = Math.max(0, Math.min(offset, text.length()));
++        int idx = Arrays.binarySearch(lineStarts, clamped);
++        int line = idx >= 0 ? idx : (-idx - 2);
++        if (line < 0) {
++            line = 0;
++        }
++        int col = clamped - lineStarts[line];
++        return new int[] { line, col };
++    }
++
++    Map<String, Object> range(int startOffset, int endOffset) {
++        int s = Math.max(0, Math.min(startOffset, text.length()));
++        int e = Math.max(s, Math.min(endOffset, text.length()));
++        int[] sp = positionAt(s);
++        int[] ep = positionAt(e);
++        return Json.obj(
++                "start", Json.obj("line", sp[0], "character", sp[1]),
++                "end", Json.obj("line", ep[0], "character", ep[1]));
++    }
++
++    Map<String, Object> fullDocumentRange() {
++        return range(0, text.length());
++    }
++
++    Map<String, Object> location(int startOffset, int endOffset) {
++        return Json.obj("uri", uri, "range", range(startOffset, endOffset));
++    }
++
++    int[] findIdentifierSpan(int searchStart, int searchEnd, String ident) {
++        if (ident == null || ident.isEmpty()) {
++            int s = Math.max(0, Math.min(searchStart, text.length()));
++            return new int[] { s, Math.min(s + 1, text.length()) };
++        }
++        int from = Math.max(0, Math.min(searchStart, text.length()));
++        int to = Math.max(from, Math.min(searchEnd, text.length()));
++        int pos = from;
++        while (pos <= to - ident.length()) {
++            int found = text.indexOf(ident, pos);
++            if (found < 0 || found + ident.length() > to) {
++                break;
++            }
++            boolean leftOk = found == 0 || !Character.isJavaIdentifierPart(text.charAt(found - 1));
++            int after = found + ident.length();
++            boolean rightOk = after >= text.length() || !Character.isJavaIdentifierPart(text.charAt(after));
++            if (leftOk && rightOk) {
++                return new int[] { found, after };
++            }
++            pos = found + 1;
++        }
++        return new int[] { from, Math.min(from + ident.length(), text.length()) };
++    }
++
++    int[] findLastIdentifierSpan(int searchStart, int searchEnd, String ident) {
++        if (ident == null || ident.isEmpty()) {
++            return findIdentifierSpan(searchStart, searchEnd, ident);
++        }
++        int from = Math.max(0, Math.min(searchStart, text.length()));
++        int to = Math.max(from, Math.min(searchEnd, text.length()));
++        int best = -1;
++        int pos = from;
++        while (pos <= to - ident.length()) {
++            int found = text.indexOf(ident, pos);
++            if (found < 0 || found + ident.length() > to) {
++                break;
++            }
++            boolean leftOk = found == 0 || !Character.isJavaIdentifierPart(text.charAt(found - 1));
++            int after = found + ident.length();
++            boolean rightOk = after >= text.length() || !Character.isJavaIdentifierPart(text.charAt(after));
++            if (leftOk && rightOk) {
++                best = found;
++            }
++            pos = found + 1;
++        }
++        if (best >= 0) {
++            return new int[] { best, best + ident.length() };
++        }
++        return new int[] { from, Math.min(from + ident.length(), text.length()) };
++    }
++}
+diff --git a/compiler/src/main/java/org/teavm/javac/lsp/TreeLocator.java b/compiler/src/main/java/org/teavm/javac/lsp/TreeLocator.java
+new file mode 100644
+index 0000000..32d5e81
+--- /dev/null
++++ b/compiler/src/main/java/org/teavm/javac/lsp/TreeLocator.java
+@@ -0,0 +1,119 @@
++package org.teavm.javac.lsp;
++
++import com.sun.source.tree.Tree;
++import com.sun.source.util.TreePath;
++import com.sun.source.util.TreePathScanner;
++import com.sun.tools.javac.code.Symbol;
++import com.sun.tools.javac.tree.JCTree;
++import com.sun.tools.javac.tree.TreeInfo;
++
++final class TreeLocator {
++    private TreeLocator() {
++    }
++
++    static TreePath findInnermostPath(JCTree.JCCompilationUnit unit, int offset) {
++        if (unit == null) {
++            return null;
++        }
++        var finder = new OffsetPathFinder(unit, offset);
++        finder.scan(unit, null);
++        return finder.best;
++    }
++
++    static Symbol resolveSymbol(TreePath path) {
++        TreePath cur = path;
++        while (cur != null) {
++            Tree leaf = cur.getLeaf();
++            Symbol sym = symbolOfTree(leaf);
++            if (sym != null) {
++                return sym;
++            }
++            cur = cur.getParentPath();
++        }
++        return null;
++    }
++
++    static Symbol symbolOfTree(Tree leaf) {
++        if (leaf instanceof JCTree.JCIdent ident) {
++            return ident.sym;
++        }
++        if (leaf instanceof JCTree.JCFieldAccess fa) {
++            return fa.sym;
++        }
++        if (leaf instanceof JCTree.JCClassDecl cd) {
++            return cd.sym;
++        }
++        if (leaf instanceof JCTree.JCMethodDecl md) {
++            return md.sym;
++        }
++        if (leaf instanceof JCTree.JCVariableDecl vd) {
++            return vd.sym;
++        }
++        if (leaf instanceof JCTree.JCNewClass nc) {
++            if (nc.constructor != null) {
++                return nc.constructor;
++            }
++            if (nc.clazz instanceof JCTree t) {
++                return TreeInfo.symbol(t);
++            }
++        }
++        if (leaf instanceof JCTree.JCMemberReference mr) {
++            return mr.sym;
++        }
++        if (leaf instanceof JCTree.JCTypeParameter tp && tp.type != null) {
++            return tp.type.tsym;
++        }
++        if (leaf instanceof JCTree t) {
++            return TreeInfo.symbol(t);
++        }
++        return null;
++    }
++
++    static int startPos(JCTree tree) {
++        int p = tree.getStartPosition();
++        return p >= 0 ? p : tree.pos;
++    }
++
++    static int endPos(JCTree tree, JCTree.JCCompilationUnit unit) {
++        int end = unit.endPositions != null ? tree.getEndPosition(unit.endPositions) : -1;
++        return end >= 0 ? end : Math.max(0, startPos(tree));
++    }
++
++    private static final class OffsetPathFinder extends TreePathScanner<Void, Void> {
++        private final JCTree.JCCompilationUnit unit;
++        private final int offset;
++        TreePath best;
++        private int bestSpan = Integer.MAX_VALUE;
++
++        OffsetPathFinder(JCTree.JCCompilationUnit unit, int offset) {
++            this.unit = unit;
++            this.offset = offset;
++        }
++
++        @Override
++        public Void scan(Tree tree, Void p) {
++            if (!(tree instanceof JCTree jc)) {
++                return null;
++            }
++            int start = startPos(jc);
++            int end = endPos(jc, unit);
++            if (start < 0 || end < start) {
++                return super.scan(tree, p);
++            }
++            // Note: for JCTree.JCCompilationUnit, always recurse.
++            if (tree instanceof JCTree.JCCompilationUnit) {
++                best = new TreePath(unit);
++                return super.scan(tree, p);
++            }
++            if (offset < start || offset > end) {
++                return null;
++            }
++            int span = end - start;
++            if (span <= bestSpan) {
++                bestSpan = span;
++                best = new TreePath(getCurrentPath(), tree);
++            }
++            return super.scan(tree, p);
++        }
++    }
++}
+diff --git a/compiler/src/main/java/org/teavm/javac/lsp/TypeFormatter.java b/compiler/src/main/java/org/teavm/javac/lsp/TypeFormatter.java
+new file mode 100644
+index 0000000..661ae2d
+--- /dev/null
++++ b/compiler/src/main/java/org/teavm/javac/lsp/TypeFormatter.java
+@@ -0,0 +1,178 @@
++package org.teavm.javac.lsp;
++
++import com.sun.tools.javac.code.Flags;
++import com.sun.tools.javac.code.Symbol;
++import com.sun.tools.javac.code.Type;
++import com.sun.tools.javac.code.Types;
++import java.util.List;
++import javax.lang.model.element.Modifier;
++
++final class TypeFormatter {
++    private TypeFormatter() {
++    }
++
++    static String shortType(Type type) {
++        if (type == null) {
++            return "Object";
++        }
++        return switch (type.getTag()) {
++            case BYTE -> "byte";
++            case CHAR -> "char";
++            case SHORT -> "short";
++            case INT -> "int";
++            case LONG -> "long";
++            case FLOAT -> "float";
++            case DOUBLE -> "double";
++            case BOOLEAN -> "boolean";
++            case VOID -> "void";
++            case BOT -> "null";
++            case ARRAY -> shortType(((Type.ArrayType) type).elemtype) + "[]";
++            case TYPEVAR -> type.tsym != null ? type.tsym.name.toString() : type.toString();
++            case WILDCARD -> {
++                var w = (Type.WildcardType) type;
++                yield switch (w.kind) {
++                    case UNBOUND -> "?";
++                    case EXTENDS -> "? extends " + shortType(w.type);
++                    case SUPER -> "? super " + shortType(w.type);
++                };
++            }
++            case CLASS -> {
++                var ct = (Type.ClassType) type;
++                var sb = new StringBuilder();
++                if (ct.tsym != null) {
++                    sb.append(ct.tsym.name.toString());
++                } else {
++                    sb.append(type.toString());
++                }
++                if (ct.typarams_field != null && !ct.typarams_field.isEmpty()) {
++                    sb.append('<');
++                    boolean first = true;
++                    for (Type arg : ct.typarams_field) {
++                        if (!first) {
++                            sb.append(", ");
++                        }
++                        first = false;
++                        sb.append(shortType(arg));
++                    }
++                    sb.append('>');
++                }
++                yield sb.toString();
++            }
++            default -> {
++                String raw = type.toString();
++                yield raw.startsWith("java.lang.") ? raw.substring("java.lang.".length()) : raw;
++            }
++        };
++    }
++
++    static String formatMethodParamTypesKey(Symbol.MethodSymbol method, Type memberType) {
++        var sb = new StringBuilder();
++        List<Type> paramTypes = memberType instanceof Type.MethodType mt
++                ? mt.argtypes
++                : (method.type instanceof Type.MethodType mt2 ? mt2.argtypes : List.of());
++        if (paramTypes != null) {
++            for (int i = 0; i < paramTypes.size(); i++) {
++                if (i > 0) {
++                    sb.append(',');
++                }
++                sb.append(shortType(paramTypes.get(i)));
++            }
++        }
++        return sb.toString();
++    }
++
++    static String formatMethodParams(Symbol.MethodSymbol method, Type memberType) {
++        var sb = new StringBuilder();
++        var params = method.params();
++        List<Type> paramTypes = memberType instanceof Type.MethodType mt
++                ? mt.argtypes
++                : (method.type instanceof Type.MethodType mt2 ? mt2.argtypes : List.of());
++        boolean isVarArgs = (method.flags() & Flags.VARARGS) != 0;
++
++        int n = Math.max(params != null ? params.size() : 0, paramTypes != null ? paramTypes.size() : 0);
++        for (int i = 0; i < n; i++) {
++            if (i > 0) {
++                sb.append(", ");
++            }
++            Type pt = (paramTypes != null && i < paramTypes.size())
++                    ? paramTypes.get(i)
++                    : (params != null && i < params.size() ? params.get(i).type : null);
++            String typeStr;
++            if (isVarArgs && i == n - 1 && pt instanceof Type.ArrayType at) {
++                typeStr = shortType(at.elemtype) + "...";
++            } else {
++                typeStr = shortType(pt);
++            }
++            sb.append(typeStr);
++            if (params != null && i < params.size()) {
++                String pName = params.get(i).name.toString();
++                if (!pName.isEmpty()) {
++                    sb.append(' ').append(pName);
++                }
++            }
++        }
++        return sb.toString();
++    }
++
++    static String formatMethodReturnType(Symbol.MethodSymbol method, Type memberType) {
++        if (memberType instanceof Type.MethodType mt) {
++            return shortType(mt.restype);
++        }
++        if (memberType instanceof Type.ForAll fa && fa.qtype instanceof Type.MethodType mt) {
++            return shortType(mt.restype);
++        }
++        return shortType(method.getReturnType());
++    }
++
++    static Type resolveMemberType(Types types, Type receiverType, Symbol sym) {
++        if (receiverType == null || receiverType.isErroneous() || sym == null) {
++            return sym != null ? sym.type : null;
++        }
++        try {
++            Type mt = types.memberType(receiverType, sym);
++            if (mt instanceof Type.ForAll fa) {
++                return fa.qtype;
++            }
++            return mt;
++        } catch (Throwable ignored) {
++            return sym.type;
++        }
++    }
++
++    static String formatModifiers(Symbol sym) {
++        var sb = new StringBuilder();
++        for (Modifier m : sym.getModifiers()) {
++            sb.append(m.toString()).append(' ');
++        }
++        return sb.toString();
++    }
++
++    static String formatMethodSignature(Symbol.MethodSymbol method, Type memberType, boolean includeOwner) {
++        var sb = new StringBuilder();
++        if (!method.type.getTypeArguments().isEmpty() || !method.getTypeParameters().isEmpty()) {
++            var tps = method.getTypeParameters();
++            if (!tps.isEmpty()) {
++                sb.append('<');
++                for (int i = 0; i < tps.size(); i++) {
++                    if (i > 0) {
++                        sb.append(", ");
++                    }
++                    sb.append(tps.get(i).name);
++                }
++                sb.append("> ");
++            }
++        }
++        if (method.isConstructor()) {
++            String ownerName = method.owner != null ? method.owner.name.toString() : "<init>";
++            sb.append(ownerName);
++        } else {
++            sb.append(formatMethodReturnType(method, memberType)).append(' ');
++            if (includeOwner && method.owner != null && !method.owner.name.isEmpty()) {
++                sb.append(method.owner.name).append('.');
++            }
++            sb.append(method.name);
++        }
++        sb.append('(').append(formatMethodParams(method, memberType)).append(')');
++        return sb.toString();
++    }
++}
 diff --git a/gradle/libs.versions.toml b/gradle/libs.versions.toml
-index 90eef9b..c8ac641 100644
+index 90eef9b..0820e5d 100644
 --- a/gradle/libs.versions.toml
 +++ b/gradle/libs.versions.toml
 @@ -1,6 +1,6 @@
@@ -1165,3 +4641,11 @@ index 90eef9b..c8ac641 100644
  asm = "9.8"
  junit-jupiter = "5.11.4"
  
+@@ -13,6 +13,7 @@ teavm-bootstrap-compiler = { module = "org.teavm:teavm-bootstrap-compiler", vers
+ teavm-jso = { module = "org.teavm:teavm-jso", version.ref = "teavm" }
+ teavm-jso-apis = { module = "org.teavm:teavm-jso-apis", version.ref = "teavm" }
+ asm-core = { module = "org.ow2.asm:asm", version.ref = "asm" }
++google-java-format = "com.google.googlejavaformat:google-java-format:1.35.0"
+ teavm-browser-runner = { module = "org.teavm:teavm-browser-runner", version.ref = "teavm" }
+ jackson-databind = { module = "tools.jackson.core:jackson-databind", version = "3.1.4" }
+ junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit-jupiter" }
